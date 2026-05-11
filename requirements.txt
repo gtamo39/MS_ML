@@ -1,0 +1,34 @@
+ipykernel>=6.25.2
+ipython>=8.15.0
+numpy>=1.24.4
+pandas>=2.0.3
+matplotlib<3.8
+seaborn==0.13.2
+tqdm==4.67.1
+#langchain==1.0.2
+#langchain-anthropic==1.0.0
+#langchain-core==1.0.1
+#langchain-openai==1.0.1
+#langgraph==1.0.1
+#bs4==0.0.2
+#playwright==1.55.0
+#grandalf==0.8
+py3Dmol==2.5.3
+rdkit==2025.9.3
+networkx==3.6.1
+dill==0.4.0
+scikit-learn==1.8.0
+numba==0.63.1
+prolif==2.0.3
+meeko==0.7.1
+gemmi==0.7.4
+xgboost==3.2.0
+adjustText==1.3.0
+nonconformist==2.1.0
+openTSNE==1.0.4
+chembl-webresource-client==0.10.9
+PubChemPy==1.0.5
+shap==0.46.0   # last release supporting numpy<2; do not bump without lifting matplotlib<3.8
+plotly>=5.20   # interactive 3D embedding (Statistics_tools.plot_multi_class_to_embedding_3d)
+nbformat>=4.2.0   # required by plotly to render inline in Jupyter
+openpyxl==3.1.5

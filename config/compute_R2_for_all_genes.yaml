@@ -1,0 +1,91 @@
+# Config for python/compute_R2_for_all_genes.py — full-proteome SAR R² screen.
+#
+# Defaults match the iter-83 deployable champion (H236 single RF on multi-FP),
+# with per-gene winsorize-vs-raw logfc selection based on the iter-79–82
+# priority-cohort lever map.
+
+data:
+  # Full df_raw (22 M rows, 12 K genes). Compound + batch parsed from MoleculeBatchID.
+  df_raw_csv: data/MS/20260424_Proteomics_Database_CSV_Export.csv
+  # Cleaned MS metadata — used by baseline.ipynb to filter df_raw down to
+  # the LATEST test per compound, SERAC source only. Without this filter,
+  # older retests of the same compound are double-counted in per-compound
+  # aggregates (silently differs from baseline).
+  clean_proteomics_csv: data/MS/CDD CSV Export - 2026-04-29 06h13m33s.csv
+  # MF_features pickle holding the feature columns the model expects.
+  # inputs_multifp.pkl already has Morgan(2048) + 6 physchem + MACCS(167) + AtomPair(1317).
+  mf_features_pickle: autoresearch/optimizeMS_genes_R2/logs/inputs_multifp.pkl
+
+model:
+  # Production deployable champion: single RandomForest, no SeedAvgRF averaging
+  # (averaging gave +0.005 on calibration cohort but ~0 on priority — skip the
+  # 5× compute cost).
+  cls: RandomForestRegressor
+  params:
+    n_estimators: 200
+    max_depth: 20
+    max_features: 0.3
+    min_samples_leaf: 2
+    min_samples_split: 4
+  # Each worker process spawns its own RF with this many threads.
+  # Total threads = parallelism.n_processes × this.
+  # NOTE: when nested in multiprocessing, sklearn defaults to loky backend which
+  # silently drops to n_jobs=1. The script wraps RF fits in joblib's threading
+  # backend so nested parallelism actually runs as configured.
+  n_jobs_per_process: 1
+
+features:
+  # Either set `preset` (computed on the fly) OR `feature_list_path`
+  # (an explicit JSON / YAML list of feature column names — guarantees
+  # exact match with the trained champion if you saved the list).
+  preset: multi_fp_champion       # Morgan-filtered + physchem + MACCS + AtomPair
+  prevalence_cutoff: 0.02         # Morgan-bit prevalence filter (matches H14)
+  # feature_list_path: autoresearch/optimizeMS_genes_R2/logs/h225_feature_list.json
+
+drop_plates:
+  # Globally-derived plate-drop set (H1, validated across calibration cohort).
+  - Plate12
+  - Plate15
+  - Plate23
+
+labels:
+  default: logfc_clipped          # per-gene 1-99% winsorize (computed lazily by worker)
+  # Genes where winsorize HURT performance (Δ < -0.005 in iter-79-82 ablation,
+  # plus UNC45A from the calibration cohort H236 test). Use raw logfc for these.
+  raw_logfc_genes:
+    - PARP4        # winsor 0.194 → raw 0.261, Δ=-0.067 (biggest)
+    - TGFBR3       # 0.095 → 0.129, Δ=-0.034
+    - MERTK        # 0.172 → 0.193, Δ=-0.021
+    - PIK3CA       # 0.019 → 0.039, Δ=-0.020
+    - MCL1         # 0.027 → 0.037, Δ=-0.010
+    - PIK3CD       # 0.020 → 0.030, Δ=-0.010
+    - MDM2         # 0.060 → 0.068, Δ=-0.008
+    - ROCK1        # 0.050 → 0.058, Δ=-0.008
+    - UNC45A       # from calibration test: 0.111 → 0.135, Δ=-0.024
+
+cv:
+  folds: 5
+  seed: 0
+
+filtering:
+  # Skip genes with fewer than this many unique compounds — model unreliable.
+  min_compounds: 100
+
+parallelism:
+  # Empirical optimum on this 32-core machine (benchmark on 40 priority genes):
+  #   n_proc=4:  0.13 gene/s
+  #   n_proc=8:  0.21 gene/s
+  #   n_proc=16: 0.27 gene/s
+  #   n_proc=24: 0.30 gene/s   ← best (+8% over 32, 2.4× over 4)
+  #   n_proc=32: 0.28 gene/s   (hyperthread contention starts hurting)
+  # Likely 16 physical cores + SMT hyperthreads → 24 hits the sweet spot.
+  n_processes: 24
+
+output:
+  # CSV with the same columns as output/MS/20260505_geneSAR_R2_ctf0.4.csv:
+  #   gene, R2, nullR2, n   (sorted by R2 descending, NaN last; nullR2 = 0)
+  results_path: output/MS/20260509_geneSAR_R2_full_genome.csv
+  # Periodic flush so a crash doesn't lose all progress.
+  checkpoint_every: 100
+  # Skip genes already in results_path (set false to recompute everything).
+  resume: true
