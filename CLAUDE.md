@@ -68,6 +68,22 @@ preferences. Claude Code should follow these when assisting on any project.
 - **Don't paste data into web tools.** No diagram renderers, no pastebins, no gists, no shared notebooks — even if "just for visualisation".
 - **Don't sync output folders to cloud storage.** Keep `data/`, `output/`, `autoresearch/logs/`, and `tests/files/` out of any auto-syncing path.
 
+### Claude Code itself is a cloud LLM — the agent's tool outputs cross to Anthropic
+
+Claude Code (the assistant editing this codebase) runs on Anthropic's API. Every `Read` / `Bash` / `Grep` result is sent to Anthropic for inference, regardless of subscription tier (Pro / Team / Enterprise). Subscription tier only changes retention and training terms; it does **not** change whether data crosses the wire.
+
+Operational rules for the assistant in this project:
+
+- **Don't `Read`** files that contain chemical structures: `data/chemical_libs/*.csv`, raw SDFs, fingerprint matrices, anything with a `smiles` / `mol` / `inchi` column.
+- **Don't run `Bash`** that prints rows of `serac_df`, `df_raw`, `MF_features`, or any DataFrame with a `smiles` column. Schema is fine (`df.columns.tolist()`, `df.shape`, `df.dtypes`); values are not (`df.head()`).
+- **Don't `Grep`** file *contents* for compound IDs (`SRB-XXXXXXX-NNN` format). Searching file names / paths is fine.
+- **Don't echo** notebook outputs that render structure thumbnails, top-K SMILES tables, or per-compound logfc.
+- **Aggregate-only is fine**: gene names (HGNC is public), per-gene R² values, plate IDs, compound counts, model hyperparameters, code, configs.
+- **Public reference SMILES are fine** for unit tests: ethanol (`CCO`), benzene (`c1ccccc1`), aspirin, or anything from RDKit's example data.
+- If chemistry inspection is genuinely needed, ask the user to paste an *anonymised* summary (`C_001`, `G_001` with the mapping kept local), rather than reading the source file.
+
+This applies even with a Teams / Enterprise subscription. Zero-Data-Retention (ZDR) addenda reduce retention but don't eliminate the in-flight transit — the rule above is operational hygiene that's independent of which contract was signed.
+
 ### When evaluating a new dependency
 
 Before adding a library to `requirements.txt`, confirm:

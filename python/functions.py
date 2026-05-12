@@ -303,48 +303,97 @@ _HOVER_INJECT = '''
   #hover-img { position: fixed; top: 12px; right: 12px; z-index: 9999;
                background: white; border: 1px solid #bbb; padding: 6px;
                border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-               display: none; font: 11px sans-serif; color: #333; }
-  #hover-img .row { display: flex; flex-direction: row; gap: 6px; align-items: flex-start; }
+               display: none; font: 11px sans-serif; color: #333;
+               max-height: 92vh; overflow-y: auto; max-width: 96vw;
+               user-select: text; }
+  /* Pinned state — slightly bolder border so you can tell it's "stuck" */
+  #hover-img.pinned { border-color: #1D3557; border-width: 2px; padding: 5px;
+                      box-shadow: 0 4px 14px rgba(0,0,0,0.25); }
+  #hover-img .row { display: flex; flex-direction: row; gap: 6px;
+                    align-items: flex-start; flex-wrap: wrap; }
   #hover-img .cell { display: flex; flex-direction: column; align-items: center;
                      border: 1px solid #eee; border-radius: 4px; padding: 3px; }
-  #hover-img .cell img { display: block; width: 170px; height: 110px; object-fit: contain; }
+  #hover-img .cell img { display: block; width: 170px; height: 110px;
+                         object-fit: contain;
+                         user-select: none; -webkit-user-drag: none; pointer-events: none; }
   #hover-img .cell .cap { padding-top: 2px; max-width: 170px; word-wrap: break-word;
-                          text-align: center; line-height: 1.25; }
-  #hover-img .gene { font-weight: 600; padding-bottom: 4px; text-align: center; }
+                          text-align: center; line-height: 1.25;
+                          user-select: text; cursor: text; }
+  /* Triple-click selects just the compound id, easy copy/paste */
+  #hover-img .cell .cap b { user-select: all; }
+  #hover-img .header { display: flex; align-items: center; gap: 8px;
+                       padding-bottom: 4px; }
+  #hover-img .gene { font-weight: 600; flex: 1; text-align: left; user-select: text; }
+  #hover-img .hint { color: #999; font-size: 10px; font-style: italic; }
+  #hover-img.pinned .hint { display: none; }
+  #hover-img .close { display: none; cursor: pointer; font-size: 16px;
+                      color: #888; padding: 0 6px; border-radius: 3px;
+                      user-select: none; line-height: 1; }
+  #hover-img.pinned .close { display: inline-block; }
+  #hover-img .close:hover { background: #eee; color: #333; }
 </style>
 <div id="hover-img">
-  <div class="gene" id="hover-img-gene"></div>
-  <div class="row"  id="hover-img-row"></div>
+  <div class="header">
+    <span class="gene" id="hover-img-gene"></span>
+    <span class="hint">hover → click dot to pin</span>
+    <span class="close" id="hover-img-close" title="Close (Esc)">×</span>
+  </div>
+  <div class="row" id="hover-img-row"></div>
 </div>
 <script>
   document.addEventListener("DOMContentLoaded", function() {
     var box  = document.getElementById("hover-img");
     var row  = document.getElementById("hover-img-row");
     var gn   = document.getElementById("hover-img-gene");
+    var clo  = document.getElementById("hover-img-close");
     var gd   = document.querySelector(".plotly-graph-div") || document.querySelector(".js-plotly-plot");
     if (!gd) return;
-    gd.on("plotly_hover", function(e) {
-      var p = e.points && e.points[0];
-      if (!p || !p.customdata) { box.style.display = "none"; return; }
+    var pinned = false;
+    function render(p) {
+      if (!p || !p.customdata) return false;
       var arr = p.customdata;
-      if (!arr || !arr.length) { box.style.display = "none"; return; }
+      if (!arr || !arr.length) return false;
       var html = "";
       for (var i = 0; i < arr.length; i++) {
         var t = arr[i];
         if (!t || !t[1]) continue;
         html += '<div class="cell">'
-              + '<img src="data:image/png;base64,' + t[1] + '"/>'
+              + '<img src="data:image/png;base64,' + t[1] + '" draggable="false"/>'
               + '<div class="cap"><b>' + (t[0] || '') + '</b>'
               + (t[2] ? '<br>logfc ' + t[2] : '') + '</div>'
               + '</div>';
       }
-      if (!html) { box.style.display = "none"; return; }
+      if (!html) return false;
       var gene = (p.data && p.data.text && p.data.text[p.pointNumber]) || '';
       gn.textContent = gene;
       row.innerHTML = html;
-      box.style.display = "block";
+      return true;
+    }
+    function unpin() {
+      pinned = false;
+      box.classList.remove("pinned");
+      box.style.display = "none";
+    }
+    gd.on("plotly_hover", function(e) {
+      if (pinned) return;
+      if (render(e.points && e.points[0])) box.style.display = "block";
+      else box.style.display = "none";
     });
-    gd.on("plotly_unhover", function() { box.style.display = "none"; });
+    gd.on("plotly_unhover", function() {
+      if (pinned) return;
+      box.style.display = "none";
+    });
+    gd.on("plotly_click", function(e) {
+      if (render(e.points && e.points[0])) {
+        pinned = true;
+        box.classList.add("pinned");
+        box.style.display = "block";
+      }
+    });
+    clo.addEventListener("click", unpin);
+    document.addEventListener("keydown", function(e) {
+      if (e.key === "Escape" && pinned) unpin();
+    });
   });
 </script>
 '''
@@ -360,6 +409,7 @@ def plot_target_3d(
     min_r2_highlight=0.10,
     min_os_auto=0.60,
     top_n_hover=5,
+    png_dir='data/srb_png',
     disease_area_colors=None,
     na_area_color='#bbbbbb',
     title='SAR predictability × disease relevance × MCS fold-enrichment',
@@ -456,16 +506,26 @@ def plot_target_3d(
         f'highlighted is missing top1..top{top_n_hover} columns'
     )
 
-    def _smi_to_b64(smi, size=(170, 110)):
-        if not isinstance(smi, str) or not smi:
-            return ''
-        m = Chem.MolFromSmiles(smi)
-        if m is None:
-            return ''
-        img = Draw.MolToImage(m, size=size)
-        buf = io.BytesIO()
-        img.save(buf, format='PNG')
-        return base64.b64encode(buf.getvalue()).decode()
+    # source-of-image preference: data/srb_png/<compound>.png  →  RDKit-from-SMILES
+    _stats = {'png': 0, 'rdkit': 0, 'miss': 0}
+
+    def _compound_b64(compound, smi, size=(170, 110)):
+        if isinstance(compound, str) and compound and png_dir:
+            p = os.path.join(png_dir, f'{compound}.png')
+            if os.path.isfile(p):
+                with open(p, 'rb') as fh:
+                    _stats['png'] += 1
+                    return base64.b64encode(fh.read()).decode()
+        if isinstance(smi, str) and smi:
+            m = Chem.MolFromSmiles(smi)
+            if m is not None:
+                img = Draw.MolToImage(m, size=size)
+                buf = io.BytesIO()
+                img.save(buf, format='PNG')
+                _stats['rdkit'] += 1
+                return base64.b64encode(buf.getvalue()).decode()
+        _stats['miss'] += 1
+        return ''
 
     custom = {}
     for _, row in highlighted.iterrows():
@@ -476,13 +536,16 @@ def plot_target_3d(
             l = row.get(f'top{k}_logfc')
             triples.append([
                 str(c) if pd.notna(c) else '',
-                _smi_to_b64(s) if pd.notna(s) else '',
+                _compound_b64(c if pd.notna(c) else None,
+                              s if pd.notna(s) else None),
                 f'{l:.2f}' if pd.notna(l) else '',
             ])
         custom[row['gene']] = triples
 
-    n_thumbs = sum(1 for triples in custom.values() for t in triples if t[1])
-    print(f'> built {n_thumbs:,} structure thumbnails across {len(custom)} highlighted genes')
+    n_thumbs = _stats['png'] + _stats['rdkit']
+    print(f'> built {n_thumbs:,} structure thumbnails across {len(custom)} highlighted genes '
+          f'(png={_stats["png"]}, rdkit-fallback={_stats["rdkit"]}, missing={_stats["miss"]}; '
+          f'png_dir={png_dir!r})')
 
     # 4) build figure
     def _hover_text(df):
