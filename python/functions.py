@@ -323,7 +323,9 @@ _HOVER_INJECT = '''
   #hover-img .cell .cap b { user-select: all; }
   #hover-img .header { display: flex; align-items: center; gap: 8px;
                        padding-bottom: 4px; }
-  #hover-img .gene { font-weight: 600; flex: 1; text-align: left; user-select: text; }
+  #hover-img .gene { font-weight: 600; text-align: left; user-select: text; }
+  #hover-img .meta { color: #555; font-size: 10px; font-family: ui-monospace, monospace;
+                     user-select: text; flex: 1; }
   #hover-img .hint { color: #999; font-size: 10px; font-style: italic; }
   #hover-img.pinned .hint { display: none; }
   #hover-img .close { display: none; cursor: pointer; font-size: 16px;
@@ -331,49 +333,101 @@ _HOVER_INJECT = '''
                       user-select: none; line-height: 1; }
   #hover-img.pinned .close { display: inline-block; }
   #hover-img .close:hover { background: #eee; color: #333; }
+  /* Volcano panel — only when pinned, shown on cell-hover via JS. */
+  #hover-img .volcano { display: none; margin-top: 6px; text-align: center; }
+  #hover-img .volcano .vlabel { font-size: 10px; color: #555; margin-bottom: 2px; }
+  #hover-img .volcano img { max-width: 100%; height: auto;
+                            border: 1px solid #eee; border-radius: 4px; }
 </style>
 <div id="hover-img">
   <div class="header">
     <span class="gene" id="hover-img-gene"></span>
-    <span class="hint">hover → click dot to pin</span>
+    <span class="meta" id="hover-img-meta"></span>
+    <span class="hint">hover → click dot to pin → hover a compound for its volcano</span>
     <span class="close" id="hover-img-close" title="Close (Esc)">×</span>
   </div>
   <div class="row" id="hover-img-row"></div>
+  <div class="volcano" id="hover-img-volcano">
+    <div class="vlabel" id="hover-img-volcano-label"></div>
+    <img id="hover-img-volcano-img" alt="volcano"/>
+  </div>
 </div>
 <script>
   document.addEventListener("DOMContentLoaded", function() {
     var box  = document.getElementById("hover-img");
     var row  = document.getElementById("hover-img-row");
     var gn   = document.getElementById("hover-img-gene");
+    var meta = document.getElementById("hover-img-meta");
     var clo  = document.getElementById("hover-img-close");
+    var volBox = document.getElementById("hover-img-volcano");
+    var volImg = document.getElementById("hover-img-volcano-img");
+    var volLab = document.getElementById("hover-img-volcano-label");
     var gd   = document.querySelector(".plotly-graph-div") || document.querySelector(".js-plotly-plot");
     if (!gd) return;
     var pinned = false;
+    var currentGene = "";
     function render(p) {
       if (!p || !p.customdata) return false;
       var arr = p.customdata;
       if (!arr || !arr.length) return false;
+      var metaTxt = "";
       var html = "";
+      var cellIdx = 0;            // running compound-slot index for volcano lookup
       for (var i = 0; i < arr.length; i++) {
         var t = arr[i];
-        if (!t || !t[1]) continue;
-        html += '<div class="cell">'
+        if (!t) continue;
+        // Gene-level meta row: ['__META__', '', '<key>=<val>']
+        if (t[0] === "__META__") { metaTxt = t[2] || ""; continue; }
+        if (!t[1]) continue;
+        html += '<div class="cell" data-idx="' + cellIdx + '" data-cmp="' + (t[0] || '') + '">'
               + '<img src="data:image/png;base64,' + t[1] + '" draggable="false"/>'
               + '<div class="cap"><b>' + (t[0] || '') + '</b>'
               + (t[2] ? '<br>logfc ' + t[2] : '') + '</div>'
               + '</div>';
+        cellIdx++;
       }
       if (!html) return false;
       var gene = (p.data && p.data.text && p.data.text[p.pointNumber]) || '';
+      currentGene = gene;
       gn.textContent = gene;
+      meta.textContent = metaTxt;
       row.innerHTML = html;
+      // Stash the customdata array on the row so per-cell hover handlers can read it.
+      row._arr = arr;
+      // Reset volcano panel on each fresh render.
+      volBox.style.display = "none";
+      volImg.src = "";
       return true;
     }
     function unpin() {
       pinned = false;
       box.classList.remove("pinned");
       box.style.display = "none";
+      volBox.style.display = "none";
     }
+    // Event delegation: any compound cell, when the panel is pinned, shows
+    // its associated volcano (customdata column index 3) on hover.
+    row.addEventListener("mouseover", function(e) {
+      if (!pinned) return;
+      var cell = e.target.closest(".cell");
+      if (!cell) return;
+      var arr = row._arr;
+      if (!arr) return;
+      // Skip __META__ row when locating the cell's source entry.
+      var skip = (arr[0] && arr[0][0] === "__META__") ? 1 : 0;
+      var idx = parseInt(cell.getAttribute("data-idx"), 10) + skip;
+      var t = arr[idx];
+      if (!t || !t[3]) return;
+      volImg.src = "data:image/png;base64," + t[3];
+      volLab.textContent = currentGene + " · " + (cell.getAttribute("data-cmp") || "");
+      volBox.style.display = "block";
+    });
+    row.addEventListener("mouseout", function(e) {
+      if (!pinned) return;
+      // Only hide when the cursor truly leaves the row (not when moving between cells).
+      if (e.relatedTarget && row.contains(e.relatedTarget)) return;
+      volBox.style.display = "none";
+    });
     gd.on("plotly_hover", function(e) {
       if (pinned) return;
       if (render(e.points && e.points[0])) box.style.display = "block";
@@ -410,6 +464,10 @@ def plot_target_3d(
     min_os_auto=0.60,
     top_n_hover=5,
     png_dir='data/srb_png',
+    df_raw=None,
+    volcano_size_px=350,
+    volcano_xlim=(-5.0, 5.0),
+    volcano_n_jobs=1,
     disease_area_colors=None,
     na_area_color='#bbbbbb',
     title='SAR predictability × disease relevance × MCS fold-enrichment',
@@ -530,6 +588,15 @@ def plot_target_3d(
     custom = {}
     for _, row in highlighted.iterrows():
         triples = []
+        # Index 0 is a per-gene META row: ['__META__', '', '<fisher_p str>'].
+        # The hover JS detects '__META__' to populate the panel header; the
+        # existing compound-render loop skips it because t[1] (b64) is empty.
+        fp_val = row.get('fisher_p') if 'fisher_p' in highlighted.columns else None
+        if fp_val is None or pd.isna(fp_val):
+            fp_str = '—'
+        else:
+            fp_str = '< 0.0001' if fp_val < 0.0001 else f'{fp_val:.4f}'
+        triples.append(['__META__', '', f'fisher_p={fp_str}'])
         for k in range(1, top_n_hover + 1):
             c = row.get(f'top{k}_compound')
             s = row.get(f'top{k}_smiles')
@@ -547,16 +614,119 @@ def plot_target_3d(
           f'(png={_stats["png"]}, rdkit-fallback={_stats["rdkit"]}, missing={_stats["miss"]}; '
           f'png_dir={png_dir!r})')
 
+    # 3b) optional per-(gene, compound) volcano thumbnails. Each compound row
+    #     gets a 4th element: a base64 PNG of the volcano. Shown by the JS
+    #     panel only when pinned AND the user hovers a compound cell.
+    if df_raw is not None:
+        # Build the task list once; pad missing-compound rows so JS always has t[3].
+        tasks = []
+        for g, triples in custom.items():
+            for i in range(1, len(triples)):
+                t = triples[i]
+                if t[0]:
+                    tasks.append((g, t[0], i))
+                else:
+                    triples[i] = list(t) + ['']
+        n_expected = len(tasks)
+
+        if n_expected == 0:
+            pass
+        elif volcano_n_jobs == 1:
+            # ----- serial path (unchanged behaviour for n_jobs=1) -----
+            import matplotlib.pyplot as plt
+            pbar = tqdm(total=n_expected, desc='volcanoes',
+                        unit='cmp', mininterval=0.5)
+            for g, compound, i in tasks:
+                fig_v, ax_v = plt.subplots(
+                    figsize=(volcano_size_px / 100, volcano_size_px / 100),
+                    dpi=100)
+                try:
+                    plot_volcano(df_raw, compound, g,
+                                 xmin=volcano_xlim[0], xmax=volcano_xlim[1],
+                                 ax=ax_v, title='')
+                    buf = io.BytesIO()
+                    fig_v.savefig(buf, format='PNG', bbox_inches='tight')
+                    b64 = base64.b64encode(buf.getvalue()).decode()
+                except Exception as e:
+                    tqdm.write(f'  [warn] volcano render failed for {g}/{compound}: {e}')
+                    b64 = ''
+                finally:
+                    plt.close(fig_v)
+                custom[g][i] = list(custom[g][i]) + [b64]
+                pbar.update(1)
+            pbar.close()
+        else:
+            # ----- parallel path: pre-slice df_raw per compound, then loky -----
+            # Pre-slicing keeps per-task IPC payloads tiny — sending the full
+            # ~200k-row df_raw to every worker would dominate runtime.
+            import contextlib
+            import joblib as _joblib
+            from joblib import Parallel, delayed
+            unique_cmps = sorted({c for _, c, _ in tasks})
+            sub_cache = {
+                c: df_raw[df_raw['compound'] == c]
+                       [['compound', 'genes', 'logfc', 'pvalue']].dropna()
+                for c in unique_cmps
+            }
+            print(f'> pre-sliced df_raw for {len(unique_cmps):,} compounds; '
+                  f'rendering {n_expected:,} volcanoes on {volcano_n_jobs} workers...')
+
+            @contextlib.contextmanager
+            def _tqdm_joblib(pbar):
+                class _Cb(_joblib.parallel.BatchCompletionCallBack):
+                    def __call__(self, *a, **kw):
+                        pbar.update(n=self.batch_size)
+                        return super().__call__(*a, **kw)
+                prev = _joblib.parallel.BatchCompletionCallBack
+                _joblib.parallel.BatchCompletionCallBack = _Cb
+                try:
+                    yield pbar
+                finally:
+                    _joblib.parallel.BatchCompletionCallBack = prev
+                    pbar.close()
+
+            pbar = tqdm(total=n_expected, desc='volcanoes',
+                        unit='cmp', mininterval=0.5)
+            with _tqdm_joblib(pbar):
+                results = Parallel(n_jobs=volcano_n_jobs, backend='loky')(
+                    delayed(_volcano_render_worker)(
+                        (g, c, sub_cache[c], volcano_size_px,
+                         volcano_xlim[0], volcano_xlim[1])
+                    )
+                    for g, c, _ in tasks
+                )
+            for (g, c, i), b64 in zip(tasks, results):
+                custom[g][i] = list(custom[g][i]) + [b64]
+        print(f'> rendered {n_expected:,} volcanoes')
+    else:
+        # Pad compound rows so JS can always read t[3] safely.
+        for triples in custom.values():
+            for i in range(1, len(triples)):
+                triples[i] = list(triples[i]) + ['']
+
     # 4) build figure
     def _hover_text(df):
         areas = (df['disease_area'].fillna('—') if 'disease_area' in df.columns
                  else pd.Series(['—'] * len(df), index=df.index))
+        # Fisher's-exact p from per-gene MCS enrichment (cell 49e1bc56). Falls
+        # back to '—' if the MCS_CSV merge step hasn't run yet.
+        def _fmt_p(v):
+            if v is None or pd.isna(v):
+                return '—'
+            return '< 0.0001' if v < 0.0001 else f'{v:.4f}'
+        if 'fisher_p' in df.columns:
+            fp = df['fisher_p'].apply(_fmt_p)
+        else:
+            fp = pd.Series(['—'] * len(df), index=df.index)
         return [
-            f'<b>{g}</b><br>R²={r:.3f}<br>overall_score={s:.3f}<br>fold={f}<br>n={n}<br>area={a}'
-            for g, r, s, f, n, a in zip(df['gene'], df['R2'], df['overall_score'],
-                                  df['fold'].apply(lambda x: '∞' if not np.isfinite(x) else f'{x:.1f}'),
-                                  df.get('n', [None] * len(df)),
-                                  areas)
+            f'<b>{g}</b><br>R²={r:.3f}<br>overall_score={s:.3f}<br>'
+            f'fold={f}<br>fisher_p={p}<br>n={n}<br>area={a}'
+            for g, r, s, f, p, n, a in zip(
+                df['gene'], df['R2'], df['overall_score'],
+                df['fold'].apply(lambda x: '∞' if not np.isfinite(x) else f'{x:.1f}'),
+                fp,
+                df.get('n', [None] * len(df)),
+                areas)
         ]
 
     fig = go.Figure()
@@ -623,6 +793,125 @@ def plot_target_3d(
         fig.show()
 
     return fig, highlighted
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Per-compound volcano plot (one gene highlighted)
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+def plot_volcano(df, compound, gene,
+                 *,
+                 fc_thresh=1.0, p_thresh=0.05,
+                 xmin=-5.0, xmax=5.0,
+                 figsize=(6, 6), dpi=100,
+                 up_color='#008bfb', down_color='#ff0051',
+                 ax=None, title=None):
+    """
+    Volcano plot for a single compound, with one target gene highlighted.
+
+    For the given ``compound``, collapse multi-batch/plate replicates per gene
+    using mean ``logfc`` and min ``pvalue``. Genes are coloured by significance
+    bucket (up / down / ns) at the supplied thresholds, and ``gene`` is ringed
+    + annotated so you can see where the target of interest lands relative to
+    the rest of the proteome.
+
+    :param df df: must contain columns ``compound``, ``genes``, ``logfc``, ``pvalue``.
+    :param str compound: e.g. ``'SRB-0000615'``.
+    :param str gene: gene symbol to highlight (e.g. ``'KDM1B'``); silently
+        ignored if not measured for that compound.
+    :param float fc_thresh, p_thresh: logfc / p-value thresholds for the
+        significance buckets and the dashed reference lines.
+    :param float xmin, xmax: x-axis limits (logfc range).
+    :param tuple figsize: figure size in inches, used only when ``ax is None``.
+    :param int dpi: DPI for the new figure, used only when ``ax is None``.
+    :param str up_color, down_color: hex strings for significantly up/down dots.
+    :param Axes ax: existing matplotlib Axes to draw into; if ``None`` a new
+        figure is created.
+    :param str title: optional custom title; default = ``f'{compound}  (N genes)'``.
+    :return df: the per-gene aggregate frame
+        (``genes``, ``logfc``, ``pvalue``, ``nlog10p``), useful for downstream
+        filtering of the volcano data without recomputing the aggregation.
+    """
+    import matplotlib.pyplot as plt
+
+    sub = df[df['compound'] == compound][['genes', 'logfc', 'pvalue']].dropna()
+    if sub.empty:
+        print(f'> {compound}: no rows in df_raw')
+        return None
+    # collapse multi-batch/plate replicates per gene: mean logfc, min p
+    agg = (sub.groupby('genes')
+              .agg(logfc=('logfc', 'mean'), pvalue=('pvalue', 'min'))
+              .reset_index())
+    agg['nlog10p'] = -np.log10(agg['pvalue'].clip(lower=1e-300))
+
+    # classify
+    up   = (agg['logfc'] >=  fc_thresh) & (agg['pvalue'] <= p_thresh)
+    down = (agg['logfc'] <= -fc_thresh) & (agg['pvalue'] <= p_thresh)
+    ns   = ~(up | down)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    ax.scatter(agg.loc[ns,   'logfc'], agg.loc[ns,   'nlog10p'],
+               s=8,  c='lightgrey', edgecolor='none', alpha=0.6,
+               label=f'ns ({ns.sum()})')
+    ax.scatter(agg.loc[up,   'logfc'], agg.loc[up,   'nlog10p'],
+               s=10, c=up_color,    edgecolor='none', alpha=0.85,
+               label=f'up ({up.sum()})')
+    ax.scatter(agg.loc[down, 'logfc'], agg.loc[down, 'nlog10p'],
+               s=10, c=down_color,  edgecolor='none', alpha=0.85,
+               label=f'down ({down.sum()})')
+
+    # threshold guides
+    ax.axhline(-np.log10(p_thresh), ls='--', lw=0.7, c='#888')
+    ax.axvline(+fc_thresh,          ls='--', lw=0.7, c='#888')
+    ax.axvline(-fc_thresh,          ls='--', lw=0.7, c='#888')
+
+    # highlight target gene
+    tg = agg[agg['genes'] == gene]
+    if tg.empty:
+        print(f'> {gene} not measured for {compound}')
+    else:
+        ax.scatter(tg['logfc'], tg['nlog10p'],
+                   s=70, facecolor='none', edgecolor='black', lw=1.5, zorder=5)
+        ax.annotate(gene,
+                    xy=(tg['logfc'].iat[0], tg['nlog10p'].iat[0]),
+                    xytext=(8, 6), textcoords='offset points',
+                    fontsize=11, fontweight='bold',
+                    arrowprops=dict(arrowstyle='-', lw=0.7))
+
+    ax.set_xlim(xmin, xmax)
+    ax.set_xlabel('logfc')
+    ax.set_ylabel('-log10(p-value)')
+    ax.set_title(title or f'{compound}  ({len(agg):,} genes)')
+    ax.legend(loc='best', fontsize=8, frameon=False)
+    plt.tight_layout()
+    return agg
+
+
+def _volcano_render_worker(args):
+    """Module-level worker used by `plot_target_3d` when `n_jobs > 1`.
+
+    Has to be at module level so loky/cloudpickle can serialize it by
+    reference rather than trying to pickle a closure. Receives a small
+    pre-sliced per-compound DataFrame instead of the full ``df_raw`` to
+    keep the per-task IPC payload tiny.
+    """
+    import io, base64
+    import matplotlib
+    matplotlib.use('Agg')  # headless backend in workers
+    import matplotlib.pyplot as plt
+    gene, compound, sub, size_px, xmin, xmax = args
+    fig, ax = plt.subplots(figsize=(size_px / 100, size_px / 100), dpi=100)
+    try:
+        plot_volcano(sub, compound, gene,
+                     xmin=xmin, xmax=xmax, ax=ax, title='')
+        buf = io.BytesIO()
+        fig.savefig(buf, format='PNG', bbox_inches='tight')
+        return base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        return ''
+    finally:
+        plt.close(fig)
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
