@@ -88,7 +88,7 @@ goes to chemistry meetings.
 **Inputs**
 - `RAW_PROTEOMICS_PATH`, `CHEMLIB_PATH` — same as Plate analysis.
 - `OT_ROOT` / `OT_CACHE` — OpenTargets target-disease scores, cached under `output/MS/opentargets_target_disease.parquet`.
-- [`data/patent/20260511_pharma_sm.csv`](../data/patent/20260511_pharma_sm.csv) — big-pharma small-molecule patent targets, used for the `pharma` disease-area override.
+- [`data/patent/20260512_pharma_sm.csv`](../data/patent/20260512_pharma_sm.csv) — big-pharma small-molecule patent targets, used for the `pharma` disease-area override. Built from the Dropbox-side master xlsx (`PATENTS_RAW`) via the resolver in `data/patent/`; bump the dated filename and re-run when the master updates.
 - `data/srb_png/<compound>.png` — pre-rendered compound thumbnails for the 3D viz hover/pin panel. See [§ 4. Building `data/srb_png/`](#4-building-datasrb_png--cdd-vault-png-export) below for the download script.
 
 **Pipeline**
@@ -103,6 +103,25 @@ goes to chemistry meetings.
 Same one-gene-at-a-time pattern as `MS_Plate_analysis`: pick a gene
 (KDM1B, UNC45A, …), aggregate `logfc` per compound, fit RF/XGB, plot
 ROC and PPV. Used as a sanity check before launching the full screen.
+
+Includes a **single-gene parity plot cell** (`6f986240`) that mirrors the
+production screen bit-for-bit:
+- Per-gene 1-99% winsorize on `logfc` (raw passthrough for the 9-gene
+  `RAW_LOGFC_GENES` override set — same list as the production screen).
+- Loads `MF_features` from `autoresearch/optimizeMS_genes_R2/logs/inputs_multifp.pkl`
+  to match the screen's compound ordering exactly (live `compute_H236_features`
+  emits compounds in a different order and shifts K-fold splits).
+- Applies the Morgan-bit **prevalence-cut (mean > 0.02)** that the production
+  screen uses ([compute_R2_for_all_genes.py](../python/compute_R2_for_all_genes.py)).
+- Runs 5-fold CV via `ML_Reg.run_K_Fold_Xval_Regression` with H236 params
+  (single RF, n=200, depth=20, max_features=0.3, leaf=2, split=4).
+- Scatters `df_pred['real_y']` vs `df_pred['pred_y']`; tunable `PLOT_XLIM`
+  / `PLOT_YLIM` knobs let you zoom into the central blob vs the active tail.
+
+Use this cell to (a) confirm a single gene's screen R² matches its parity
+plot, and (b) diagnose whether the per-gene R² is genuine SAR or
+outlier-anchored (separated tail of strong actives → big drop when you
+restrict to the central |logfc|<0.5 band).
 
 ### Section 2 — Per-gene SAR screen (cells 24-27)
 - **Target list** (cell 25) — OpenTargets-ranked genes with sufficient compound coverage.
@@ -119,8 +138,10 @@ ROC and PPV. Used as a sanity check before launching the full screen.
    - X = R², Y = OpenTargets `overall_score`, Z = MCS fold-enrichment (log-scale).
    - Highlight set: top-20 closest to the (↑,↑,↑) corner ∪ all genes with `overall_score > 1.5` ∪ all `must_include` (always includes the 'pharma' genes, see cell 33 `_pharma_show`).
    - Colour by `disease_area` using `DISEASE_AREA_COLORS`. Pharma override gets navy `#1D3557`.
-   - **Hover** the dot → top-right floating panel shows up to 5 compound thumbnails per gene. Thumbnails come from `data/srb_png/<compound>.png` when available, else fall back to RDKit rendering from SMILES.
-   - **Click** the dot → the panel pins, compound IDs become triple-click-selectable (copyable). Escape or × to unpin.
+   - **Per-point tooltip** (small box near the cursor): shows `gene`, R², `overall_score`, `fold`, `fisher_p` (from the MCS enrichment in cell 30, formatted as `< 0.0001` below the floor and `0.NNNN` otherwise), `n`, and `disease_area`.
+   - **Hover** the dot → top-right floating panel shows up to 5 compound thumbnails per gene + the gene-level `fisher_p`. Thumbnails come from `data/srb_png/<compound>.png` when available (see [§ 4](#4-building-datasrb_png--cdd-vault-png-export)), else fall back to RDKit rendering from SMILES.
+   - **Click** the dot → the panel pins. Compound IDs become triple-click-selectable (copyable). Escape or × to unpin.
+   - **In pinned mode, hover a compound thumbnail** → a per-(gene, compound) volcano plot appears below the panel (logfc × −log10 p, target gene ringed). Pre-rendered when `df_raw=` is passed to `plot_target_3d`; opt-in because it adds ~12-60 s render time depending on `volcano_n_jobs` (set `volcano_n_jobs=8` for the 8-CPU parallel path, default 1 = serial).
 6. **Top-compound contrast extraction** (cell 34) — for each (gene, top-K compound) pair, look up the matching `uniquecontrast` row in `df_raw` (Mascot / MaxQuant proxy diagnostics).
 7. **MCS sweep over K** (cell 35) — sweeps the top-K cutoff (5, 10, 20, …) to see how the consensus substructure degrades — low K → cleanest MCS, high K → broader scaffold.
 8. **Compound grid + Bemis–Murcko scaffold enrichment** (cells 36-37) — labelled grid of top-K compounds per gene, plus scaffold-level enrichment of top-K vs the rest.
