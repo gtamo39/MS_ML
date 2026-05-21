@@ -1,15 +1,16 @@
 # Notebook documentation
 
-Three Jupyter notebooks in [`vignettes/`](../vignettes/) make up the
+Four Jupyter notebooks in [`vignettes/`](../vignettes/) make up the
 end-to-end MS-proteomics SAR analysis. They share the same upstream data
 ([`data/MS/`](../data/MS)) and helper modules (`python/`, `Scripts/`),
 but each one answers a different question:
 
-| Notebook                                                                 | Question it answers                                                       |
-|--------------------------------------------------------------------------|---------------------------------------------------------------------------|
-| [`MS_exploratory.ipynb`](../vignettes/MS_exploratory.ipynb)              | "Can I predict whether a new compound will be *active vs silent* at all?" |
-| [`MS_Plate_analysis.ipynb`](../vignettes/MS_Plate_analysis.ipynb)        | "Which plates carry usable signal vs scale-compressed noise?"             |
-| [`MS_TargetML.ipynb`](../vignettes/MS_TargetML.ipynb)                    | "Which target genes have predictable SAR *and* pharma/disease relevance?" |
+| Notebook                                                                       | Question it answers                                                                |
+|--------------------------------------------------------------------------------|------------------------------------------------------------------------------------|
+| [`MS_exploratory.ipynb`](../vignettes/MS_exploratory.ipynb)                    | "Can I predict whether a new compound will be *active vs silent* at all?"          |
+| [`MS_Plate_analysis.ipynb`](../vignettes/MS_Plate_analysis.ipynb)              | "Which plates carry usable signal vs scale-compressed noise?"                      |
+| [`MS_TargetML.ipynb`](../vignettes/MS_TargetML.ipynb)                          | "Which target genes have predictable SAR *and* pharma/disease relevance?"          |
+| [`MS_ML_Prioritization.ipynb`](../vignettes/MS_ML_Prioritization.ipynb)        | "Given a trained gene-model, which library / virtual compounds should we screen?"  |
 
 All three follow the project conventions in [`CLAUDE.md`](../CLAUDE.md):
 heavy intermediates persisted under `data/`/`output/`, parameters in
@@ -147,13 +148,56 @@ restrict to the central |logfc|<0.5 band).
 8. **Compound grid + Bemis–Murcko scaffold enrichment** (cells 36-37) — labelled grid of top-K compounds per gene, plus scaffold-level enrichment of top-K vs the rest.
 
 **Outputs**
-- `output/MS/20260509_geneSAR_R2_full_genome.csv` — per-gene R²/nullR²/n (≈11k rows).
+- `output/MS/20260509_geneSAR_R2_full_genome.csv` — per-gene CV results (≈11k rows). Schema:
+  `gene, R2, nullR2, n, pearson_r, pearson_p, spearman_r, spearman_p`.
+  `R2` is squared Pearson (project convention via [`stats_tools.rsquared`](../python/old/Rdkit_tools.py)). `pearson_r` is the *signed* version (catches sign-flips), `spearman_r` is the outlier-robust rank correlation (a Pearson²/Spearman² gap flags outlier-anchored fits). Both `pearson_p` and `spearman_p` are two-sided.
 - `output/MS/20260505_target_final_mcs.csv` — per-gene MCS-enrichment scores.
 - `~/Downloads/20260505_R2_vs_disease_vs_fold.html` — interactive 3D prioritisation viz with PNG thumbnails.
 
+### Live featurization (production screen)
+
+[`python/compute_R2_for_all_genes.py`](../python/compute_R2_for_all_genes.py) reproduces this notebook's per-gene screen at proteome scale (config: [`config/compute_R2_for_all_genes.yaml`](../config/compute_R2_for_all_genes.yaml)). Two featurization modes via `data.features_source`:
+
+- `pickle` *(default)* — load pre-computed `MF_features` from `autoresearch/optimizeMS_genes_R2/logs/inputs_multifp.pkl`. Fast (~0 s) but assumes the pickle's compound population matches the current chemical library snapshot.
+- `compute` — run `rdkit_tools.compute_H236_features(serac_df)` live from `data.chemlib_csv` (default `data/chemical_libs/20260430_SERAC_lib.csv`). Slower (~30 s on 10 k cpds) but matches the `FEATURES_TYPE='prevalence'` branch in the notebook bit-for-bit, including the per-cohort prevalence cut.
+
 ---
 
-## 4. Building `data/srb_png/` — CDD Vault PNG export
+## 4. `MS_ML_Prioritization.ipynb` — score libraries with a trained model
+
+The downstream "use" notebook: given a per-gene model trained in
+`MS_TargetML.ipynb`, score any compound source (Enamine virtual
+enumerations, unscreened parts of the SERAC library, custom CSVs)
+and write a prioritised SDF for chemistry to triage.
+
+**Inputs**
+- A trained joblib bundle (e.g. [`output/ML/trained_models/20260513/PCSK9_RF_H236.joblib`](../output/ML/trained_models/20260513/PCSK9_RF_H236.joblib)) — dict with at least `model`, `feature_cols`, optionally `gene`, `cv_r2`, `features`.
+- One or more compound sources:
+  - **Virtual enumerations** — Enamine SDFs with `R1_Code` / `R2_Code` tags (`rdkit_tools.get_smiles_df_from_enum`, supports `v=True` tqdm progress).
+  - **Unscreened library subset** — CSV / parquet of compounds not yet measured for the target.
+  - **Already-screened library** — used as a set-difference baseline (compounds we've tested are excluded from prioritisation).
+- A target SDF directory under `DROPBOX_ML + 'virtual libraries'` (when the prioritised compounds need round-trip vendor metadata preserved).
+
+**Pipeline**
+
+1. **Load compound source** (cells 5-9) — read SDF / CSV, canonicalise SMILES, attach `compound`, `R1_Code`, `R2_Code`, `filename` columns. The `filename` column is required by `write_filtered_enum_sdf` when preserving vendor metadata.
+2. **Exclude already-screened compounds** (cells 6-7, 10) — set-difference vs the SERAC library subset already measured for the target.
+3. **Score with the trained model** (cell 11) — `ML_Reg.MLReg_prioritize_compounds(ori_data, model, top, features_n)`. Loads the bundle, computes the full H236 feature universe on the input, lets `feature_cols` selection apply the training-time prevalence cut, predicts, sorts ascending by `predicted_label`, returns the top-N. Prints a one-line diagnostic: `> GENE  R²=…  features=…  (N cols)  predicted X/Y compounds; top N`.
+4. **Write prioritised SDF** (cell 12) — `rdkit_tools.write_filtered_enum_sdf(pred_df, source_dir, out_path, pred_col='predicted_label')`. Two modes:
+   - **`source_dir` set** — copy each kept record verbatim from `<source_dir>/<filename>.sdf` (preserves vendor tags, molblock, 3D coords).
+   - **`source_dir=None`** — build a new SDF from `df[smiles_col]` directly (`embed_2d=True` writes 2D coords). All non-`smiles` columns become SDF tags by default.
+
+**Outputs**
+- `DROPBOX_ML + 'predictions/<date>_<library>_<gene>_pred.sdf'` — prioritised SDF for chemistry.
+- (Optional) `pred_df` in-memory — the full scored frame for downstream filtering / spot-checks.
+
+**Key helpers (all in `Scripts/ML_Reg.py`)**
+- `ML_Reg.MLReg_prioritize_compounds(...)` — the end-to-end "load model → score → top-N" entry point.
+- `ML_Reg.plot_pred_intervals_from_df_pred(pred_df, kind='caterpillar'|'parity'|'fan', ...)` — diagnostic viz from a (compound, pred_y, real_y, low, up) frame produced by `pred_ints`.
+
+---
+
+## 5. Building `data/srb_png/` — CDD Vault PNG export
 
 `MS_TargetML.ipynb`'s 3D prioritisation viz (cell 33) prefers
 pre-rendered structure thumbnails from `data/srb_png/<compound>.png`
@@ -238,7 +282,23 @@ new PNGs automatically on next render.
 
 ---
 
-## How the three notebooks fit together
+## 6. Unit tests
+
+The unit tests for the shared helpers (`Statistics_tools.check_ML_data`,
+`Rdkit_tools.write_filtered_enum_sdf`, …) live next to the modules they
+cover, in [`Scripts/tests/`](../../Scripts/tests/). See
+[`Scripts/docs/documentation.md`](../../Scripts/docs/documentation.md) for full
+coverage tables and the `python -m unittest discover tests/` recipe.
+
+This `MS_ML/` repo currently doesn't ship its own test suite. If you add
+tests that exercise project-specific code (notebook helpers under
+[`python/`](../python/), the production screen in
+[`python/compute_R2_for_all_genes.py`](../python/compute_R2_for_all_genes.py),
+etc.), create `MS_ML/tests/` and document them here.
+
+---
+
+## How the four notebooks fit together
 
 ```
         ┌─────────────────────────────┐
@@ -249,20 +309,26 @@ new PNGs automatically on next render.
         ┌─────────────────────────────┐
         │  MS_TargetML.ipynb          │   per-gene R² screen + 3D viz
         │  (+ python/compute_R2_…)   │   over the full proteome
-        └──────────────┬──────────────┘
-                       │
+        └──────────────┬──────────────┘   saves trained models to
+                       │                  output/ML/trained_models/
                        ▼
         ┌─────────────────────────────┐
-        │  MS_exploratory.ipynb       │   compound-level "will this hit
-        │                             │   anything at all?" gate for
-        │                             │   the weekly enumeration
+        │  MS_ML_Prioritization.ipynb │   score new libraries with the
+        │                             │   trained gene-models → SDF
+        └─────────────────────────────┘   to chemistry
+
+        ┌─────────────────────────────┐   (orthogonal: same features,
+        │  MS_exploratory.ipynb       │   different prediction target —
+        │                             │   any-down vs target-specific)
         └─────────────────────────────┘
 ```
 
 Plate analysis is upstream of target ML (provides the drop list).
-Compound-level exploratory modelling is orthogonal — same underlying
-features, different prediction target (any-down vs target-specific
-logfc).
+Target ML produces the per-gene champion models and the prioritisation
+table; the prioritisation notebook consumes those models to score
+new compounds. Compound-level exploratory modelling is orthogonal —
+same underlying features, different prediction target (any-down vs
+target-specific logfc).
 
 ## Related docs
 

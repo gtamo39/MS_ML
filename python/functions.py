@@ -338,6 +338,50 @@ _HOVER_INJECT = '''
   #hover-img .volcano .vlabel { font-size: 10px; color: #555; margin-bottom: 2px; }
   #hover-img .volcano img { max-width: 100%; height: auto;
                             border: 1px solid #eee; border-radius: 4px; }
+
+  /* Per-gene patents panel — pinned immediately to the LEFT of the compound
+     panel (#hover-img) with an 8px gap. The exact horizontal position is set
+     by JS after each render so it tracks the compound panel's actual width.
+     Top/right here are fallbacks before JS runs. Populated from the global
+     `window.__GENE_PATENTS__` lookup built by plot_target_3d. */
+  #hover-patents {
+    position: fixed; top: 12px; right: 660px; z-index: 9999;
+    background: white; border: 1px solid #bbb; border-radius: 6px;
+    padding: 6px 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    font: 11px sans-serif; color: #333; max-width: 320px;
+    max-height: 92vh; overflow-y: auto; user-select: text;
+    display: none;
+  }
+  #hover-patents.pinned { border-color: #1D3557; border-width: 2px; padding: 5px 7px;
+                          box-shadow: 0 4px 14px rgba(0,0,0,0.25); }
+  #hover-patents .pat-header { display: flex; align-items: baseline; gap: 6px;
+                                font-weight: 700; padding-bottom: 4px;
+                                border-bottom: 1px solid #eee; margin-bottom: 4px; }
+  #hover-patents .pat-gene   { font-size: 12px; }
+  #hover-patents .pat-depmap { font-size: 10px; color: #1D3557;
+                                text-decoration: none; }
+  #hover-patents .pat-depmap:hover { text-decoration: underline; }
+  #hover-patents .pat-table  { border-collapse: collapse; width: 100%;
+                                font-size: 11px; }
+  #hover-patents .pat-table td { padding: 2px 4px; vertical-align: top; }
+  #hover-patents .pat-table tr:nth-child(even) td { background: #f8f8f8; }
+  #hover-patents .pat-empty  { color: #999; font-style: italic; padding: 4px 0; }
+
+  /* Axis-legend panel — fixed bottom-left, short labels with `title=` tooltips
+     for the full per-axis explanation. (Plotly 3D axis titles live inside the
+     WebGL canvas and don't support native HTML tooltips.) */
+  #axis-legend {
+    position: fixed; bottom: 12px; left: 12px; z-index: 9998;
+    background: white; border: 1px solid #bbb; padding: 6px 8px;
+    border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    font: 11px sans-serif; color: #333; max-width: 360px;
+    user-select: text;
+  }
+  #axis-legend .title { font-weight: 700; padding-bottom: 3px; }
+  #axis-legend .ax { display: block; padding: 1px 0; cursor: help; }
+  #axis-legend .ax b  { display: inline-block; min-width: 1.2em; color: #555; }
+  #axis-legend .ax .lab { font-weight: 600; }
+  #axis-legend .ax:hover { background: #f3f3f3; border-radius: 3px; }
 </style>
 <div id="hover-img">
   <div class="header">
@@ -352,6 +396,19 @@ _HOVER_INJECT = '''
     <img id="hover-img-volcano-img" alt="volcano"/>
   </div>
 </div>
+<div id="hover-patents"></div>
+<div id="axis-legend">
+  <div class="title">ⓘ Axis legend</div>
+  <span class="ax" title="5-fold cross-validated squared Pearson correlation between predicted and observed per-compound logfc. Higher = chemistry features (Morgan FP + physchem + MACCS + AtomPair) explain more of the activity variance for this gene. Computed by python/compute_R2_for_all_genes.py with the H236 production RF (n=200, depth=20).">
+    <b>X</b> <span class="lab">SAR predictability (R²)</span>
+  </span>
+  <span class="ax" title="OpenTargets target–disease association score (max across the priority disease franchises listed in cell d3fe884f). Higher = more clinical/literature support for the gene as a therapeutic target.">
+    <b>Y</b> <span class="lab">OpenTargets overall_score</span>
+  </span>
+  <span class="ax" title="MCS scaffold enrichment: Fisher odds ratio for the consensus scaffold of the top-K most-active compounds vs the rest. Z is log-scaled. High fold = a clear chemotype dominates the actives — actionable for chemistry expansion.">
+    <b>Z</b> <span class="lab">MCS fold-enrichment</span>
+  </span>
+</div>
 <script>
   document.addEventListener("DOMContentLoaded", function() {
     var box  = document.getElementById("hover-img");
@@ -362,10 +419,47 @@ _HOVER_INJECT = '''
     var volBox = document.getElementById("hover-img-volcano");
     var volImg = document.getElementById("hover-img-volcano-img");
     var volLab = document.getElementById("hover-img-volcano-label");
+    var patBox = document.getElementById("hover-patents");
+    var patents = window.__GENE_PATENTS__ || {};
+    var depmapTpl = window.__DEPMAP_URL__ || "https://depmap.org/portal/gene/{gene}";
     var gd   = document.querySelector(".plotly-graph-div") || document.querySelector(".js-plotly-plot");
     if (!gd) return;
     var pinned = false;
     var currentGene = "";
+    function positionPatBox() {
+      // Anchor the patents panel immediately to the LEFT of the compound panel
+      // (#hover-img), with an 8px gap. Recomputed after every render because
+      // the compound panel resizes with the number of compounds + volcano.
+      if (!patBox || !box) return;
+      var gap = 8;
+      // Read compound-panel geometry. Force display to measure offsetWidth/Left
+      // accurately (a hidden box has 0 width).
+      var prevDisp = box.style.display;
+      if (prevDisp === "none" || !prevDisp) box.style.display = "block";
+      var boxRect = box.getBoundingClientRect();
+      box.style.display = prevDisp;
+      var rightPx = Math.max(8, window.innerWidth - boxRect.left + gap);
+      patBox.style.left = "auto";
+      patBox.style.right = rightPx + "px";
+    }
+    function renderPatents(gene) {
+      if (!patBox) return;
+      var html = patents[gene];
+      if (!html) {
+        // No patents for this gene — still show a slim card with the DepMap link.
+        var depmap = depmapTpl.replace("{gene}", encodeURIComponent(gene));
+        html = '<div class="pat-header">'
+             +   '<span class="pat-gene">' + gene + '</span>'
+             +   ' <a class="pat-depmap" href="' + depmap + '" target="_blank" '
+             +     'rel="noopener" title="open in DepMap">DepMap ↗</a>'
+             + '</div>'
+             + '<div class="pat-empty">no patent entries for this gene</div>';
+      }
+      patBox.innerHTML = html;
+      patBox.style.display = "block";
+      positionPatBox();
+    }
+    window.addEventListener("resize", positionPatBox);
     function render(p) {
       if (!p || !p.customdata) return false;
       var arr = p.customdata;
@@ -382,6 +476,7 @@ _HOVER_INJECT = '''
         html += '<div class="cell" data-idx="' + cellIdx + '" data-cmp="' + (t[0] || '') + '">'
               + '<img src="data:image/png;base64,' + t[1] + '" draggable="false"/>'
               + '<div class="cap"><b>' + (t[0] || '') + '</b>'
+              + (t[4] ? ' ' + t[4] : '')                      // compound meta icons (Daniela CSV, etc.)
               + (t[2] ? '<br>logfc ' + t[2] : '') + '</div>'
               + '</div>';
         cellIdx++;
@@ -397,6 +492,8 @@ _HOVER_INJECT = '''
       // Reset volcano panel on each fresh render.
       volBox.style.display = "none";
       volImg.src = "";
+      // Render the sibling patents panel.
+      renderPatents(gene);
       return true;
     }
     function unpin() {
@@ -404,6 +501,7 @@ _HOVER_INJECT = '''
       box.classList.remove("pinned");
       box.style.display = "none";
       volBox.style.display = "none";
+      if (patBox) { patBox.classList.remove("pinned"); patBox.style.display = "none"; }
     }
     // Event delegation: any compound cell, when the panel is pinned, shows
     // its associated volcano (customdata column index 3) on hover.
@@ -436,12 +534,14 @@ _HOVER_INJECT = '''
     gd.on("plotly_unhover", function() {
       if (pinned) return;
       box.style.display = "none";
+      if (patBox) patBox.style.display = "none";
     });
     gd.on("plotly_click", function(e) {
       if (render(e.points && e.points[0])) {
         pinned = true;
         box.classList.add("pinned");
         box.style.display = "block";
+        if (patBox) patBox.classList.add("pinned");
       }
     });
     clo.addEventListener("click", unpin);
@@ -468,13 +568,18 @@ def plot_target_3d(
     volcano_size_px=350,
     volcano_xlim=(-5.0, 5.0),
     volcano_n_jobs=1,
+    compound_meta_df=None,
+    compound_meta_icons=None,
+    gene_patents_df=None,
+    gene_patents_top_n=5,
+    depmap_url_template='https://depmap.org/portal/gene/{gene}',
     disease_area_colors=None,
     na_area_color='#bbbbbb',
     title='SAR predictability × disease relevance × MCS fold-enrichment',
     html_path=None,
     height=900,
     width=1500,
-    show=True,
+    nb_display=True,
 ):
     """
     3D scatter of (R², overall_score, fold) for the ``target_final`` shortlist.
@@ -585,27 +690,100 @@ def plot_target_3d(
         _stats['miss'] += 1
         return ''
 
+    # Pre-index compound metadata for fast O(1) lookup during the per-gene loop.
+    # `compound_meta_icons` shape:
+    #   { 'col_name': {
+    #         'icon':    str,                  # emoji / character to render
+    #         'color':   str,                  # css color
+    #         'tooltip': str,                  # html title attr (optional)
+    #         'show_if': callable(v)->bool,    # default: pd.notna(v) and bool(v)
+    #         'label':   callable(v)->str,     # optional text after the icon
+    #     }, ... }
+    meta_index = None
+    if compound_meta_df is not None and compound_meta_icons:
+        # set_index('compound').to_dict('index') requires a unique index, so
+        # dedup defensively. Take the first row per compound — caller can
+        # pre-aggregate (groupby + agg) if smarter merging is needed.
+        n0 = len(compound_meta_df)
+        cm = compound_meta_df.drop_duplicates('compound', keep='first')
+        if len(cm) < n0:
+            print(f'  [warn] compound_meta_df: deduped {n0 - len(cm):,} duplicate compound rows '
+                  f'(keeping first); pre-aggregate yourself for different semantics')
+        meta_index = cm.set_index('compound').to_dict('index')
+
+    def _meta_html(compound_id):
+        if not meta_index or not compound_id:
+            return ''
+        row = meta_index.get(compound_id, {}) or {}
+        parts = []
+        for col, cfg in compound_meta_icons.items():
+            v = row.get(col)
+            tooltip = cfg.get('tooltip', col)
+
+            # --- Mode A: state_map (always-show: render a fixed icon per value)
+            #   {'state_map': {'yes': {'icon':'✅', 'color':'#2A9D8F'},
+            #                  'no':  {'icon':'❌', 'color':'#E63946'},
+            #                  '/':   {'icon':'❓', 'color':'#999'}}}
+            # Useful when you want a consistent N-slot row regardless of value.
+            state_map = cfg.get('state_map')
+            if state_map is not None:
+                key = (str(v).strip().lower() if pd.notna(v) else None)
+                state = (state_map.get(key) or state_map.get(v)
+                         or state_map.get('__default__', {'icon': '❓', 'color': '#bbb'}))
+                icon  = state.get('icon', '❓')
+                color = state.get('color', '#bbb')
+                parts.append(
+                    f'<span title="{tooltip}: {v}" '
+                    f'style="color:{color};font-weight:600;margin-left:3px;">'
+                    f'{icon}</span>'
+                )
+                continue
+
+            # --- Mode B: show_if (legacy: show/hide a single icon)
+            show_if = cfg.get('show_if', lambda x: pd.notna(x) and bool(x))
+            try:
+                ok = show_if(v)
+            except Exception:
+                ok = False
+            if not ok:
+                continue
+            icon    = cfg.get('icon', '•')
+            color   = cfg.get('color', '#666')
+            label   = cfg.get('label', lambda _v: '')(v) if callable(cfg.get('label')) else cfg.get('label', '')
+            parts.append(
+                f'<span title="{tooltip}: {v}" '
+                f'style="color:{color};font-weight:600;margin-left:3px;">'
+                f'{icon}{label}</span>'
+            )
+        return ''.join(parts)
+
     custom = {}
     for _, row in highlighted.iterrows():
         triples = []
-        # Index 0 is a per-gene META row: ['__META__', '', '<fisher_p str>'].
+        # Index 0 is a per-gene META row: ['__META__', '', '<fisher_p str>', '', ''].
         # The hover JS detects '__META__' to populate the panel header; the
         # existing compound-render loop skips it because t[1] (b64) is empty.
+        # Pad to 5 elements so all rows in customdata have a consistent shape.
         fp_val = row.get('fisher_p') if 'fisher_p' in highlighted.columns else None
         if fp_val is None or pd.isna(fp_val):
             fp_str = '—'
         else:
             fp_str = '< 0.0001' if fp_val < 0.0001 else f'{fp_val:.4f}'
-        triples.append(['__META__', '', f'fisher_p={fp_str}'])
+        triples.append(['__META__', '', f'fisher_p={fp_str}', '', ''])
         for k in range(1, top_n_hover + 1):
             c = row.get(f'top{k}_compound')
             s = row.get(f'top{k}_smiles')
             l = row.get(f'top{k}_logfc')
+            c_str = str(c) if pd.notna(c) else ''
             triples.append([
-                str(c) if pd.notna(c) else '',
+                c_str,
                 _compound_b64(c if pd.notna(c) else None,
                               s if pd.notna(s) else None),
                 f'{l:.2f}' if pd.notna(l) else '',
+                # index 3 reserved for volcano b64 (filled in 3b below);
+                # index 4 is the compound-meta HTML snippet
+                '',
+                _meta_html(c_str),
             ])
         custom[row['gene']] = triples
 
@@ -615,24 +793,22 @@ def plot_target_3d(
           f'png_dir={png_dir!r})')
 
     # 3b) optional per-(gene, compound) volcano thumbnails. Each compound row
-    #     gets a 4th element: a base64 PNG of the volcano. Shown by the JS
-    #     panel only when pinned AND the user hovers a compound cell.
+    #     already has index 3 reserved (set to '' during the build above). This
+    #     step *fills in* that slot; padding is unnecessary since the slot
+    #     exists. JS reads t[3] for the volcano payload.
     if df_raw is not None:
-        # Build the task list once; pad missing-compound rows so JS always has t[3].
-        tasks = []
-        for g, triples in custom.items():
-            for i in range(1, len(triples)):
-                t = triples[i]
-                if t[0]:
-                    tasks.append((g, t[0], i))
-                else:
-                    triples[i] = list(t) + ['']
+        # Build the task list once; rows without a compound id keep '' at idx 3.
+        tasks = [
+            (g, triples[i][0], i)
+            for g, triples in custom.items()
+            for i in range(1, len(triples)) if triples[i][0]
+        ]
         n_expected = len(tasks)
 
         if n_expected == 0:
             pass
         elif volcano_n_jobs == 1:
-            # ----- serial path (unchanged behaviour for n_jobs=1) -----
+            # ----- serial path -----
             import matplotlib.pyplot as plt
             pbar = tqdm(total=n_expected, desc='volcanoes',
                         unit='cmp', mininterval=0.5)
@@ -652,13 +828,11 @@ def plot_target_3d(
                     b64 = ''
                 finally:
                     plt.close(fig_v)
-                custom[g][i] = list(custom[g][i]) + [b64]
+                custom[g][i][3] = b64               # fill the reserved slot
                 pbar.update(1)
             pbar.close()
         else:
-            # ----- parallel path: pre-slice df_raw per compound, then loky -----
-            # Pre-slicing keeps per-task IPC payloads tiny — sending the full
-            # ~200k-row df_raw to every worker would dominate runtime.
+            # ----- parallel path -----
             import contextlib
             import joblib as _joblib
             from joblib import Parallel, delayed
@@ -696,13 +870,9 @@ def plot_target_3d(
                     for g, c, _ in tasks
                 )
             for (g, c, i), b64 in zip(tasks, results):
-                custom[g][i] = list(custom[g][i]) + [b64]
+                custom[g][i][3] = b64               # fill the reserved slot
         print(f'> rendered {n_expected:,} volcanoes')
-    else:
-        # Pad compound rows so JS can always read t[3] safely.
-        for triples in custom.values():
-            for i in range(1, len(triples)):
-                triples[i] = list(triples[i]) + ['']
+    # else: index 3 is already '' for every compound row — nothing to do.
 
     # 4) build figure
     def _hover_text(df):
@@ -783,13 +953,28 @@ def plot_target_3d(
     if html_path:
         os.makedirs(os.path.dirname(html_path), exist_ok=True)
         fig.write_html(html_path, include_plotlyjs='cdn')
+
+        # Pre-build a per-gene patents-HTML lookup. Injected as a global JS
+        # dict so the panel JS can render the table on hover/click without
+        # bloating customdata.
+        gene_patents_map = _build_gene_patents_html_map(
+            gene_patents_df, gene_patents_top_n, depmap_url_template,
+        )
+        import json as _json
+        inject_data = (
+            '<script>window.__GENE_PATENTS__ = '
+            + _json.dumps(gene_patents_map) + ';\n'
+            'window.__DEPMAP_URL__ = '
+            + _json.dumps(depmap_url_template) + ';</script>'
+        )
+
         with open(html_path) as fh:
             html = fh.read()
         with open(html_path, 'w') as fh:
-            fh.write(html.replace('</body>', _HOVER_INJECT + '</body>'))
+            fh.write(html.replace('</body>', inject_data + _HOVER_INJECT + '</body>'))
         print(f'wrote {html_path}  ({os.path.getsize(html_path) / 1e6:.1f} MB)')
 
-    if show:
+    if nb_display:
         fig.show()
 
     return fig, highlighted
@@ -886,6 +1071,55 @@ def plot_volcano(df, compound, gene,
     ax.legend(loc='best', fontsize=8, frameon=False)
     plt.tight_layout()
     return agg
+
+
+def _build_gene_patents_html_map(gene_patents_df, top_n, depmap_url_template):
+    """Build {gene: <html>} for the per-gene patents panel.
+
+    Expects a DataFrame with columns ``gene``, ``Company``, ``Patent Number``
+    (``Year`` optional, used only for sort). Returns an empty dict if the
+    input is None or missing the required columns. Caller serialises the
+    dict to JSON and injects it as a global ``window.__GENE_PATENTS__``.
+    """
+    if gene_patents_df is None or gene_patents_df.empty:
+        return {}
+    required = {'gene', 'Company', 'Patent Number'}
+    if not required.issubset(gene_patents_df.columns):
+        return {}
+
+    out = {}
+    has_year = 'Year' in gene_patents_df.columns
+    sort_cols = ['gene', 'Year'] if has_year else ['gene']
+    asc       = [True, False]    if has_year else [True]
+    df = (gene_patents_df.dropna(subset=['gene'])
+                          .sort_values(sort_cols, ascending=asc, na_position='last'))
+    for gene, grp in df.groupby('gene', sort=False):
+        rows_html = []
+        for _, r in grp.head(top_n).iterrows():
+            comp  = str(r.get('Company', '')) or '—'
+            patno = str(r.get('Patent Number', '')) or '—'
+            yr    = ''
+            if has_year and pd.notna(r.get('Year')):
+                try:
+                    yr = f' <span style="color:#999;">({int(r["Year"])})</span>'
+                except Exception:
+                    yr = ''
+            rows_html.append(
+                f'<tr><td style="padding-right:8px;font-weight:600;">{comp}</td>'
+                f'<td style="font-family:ui-monospace,monospace;color:#333;">{patno}{yr}</td></tr>'
+            )
+        if not rows_html:
+            continue
+        depmap = depmap_url_template.format(gene=gene)
+        out[gene] = (
+            f'<div class="pat-header">'
+            f'<span class="pat-gene">{gene}</span>'
+            f' <a class="pat-depmap" href="{depmap}" target="_blank" '
+            f'rel="noopener" title="open in DepMap">DepMap ↗</a>'
+            f'</div>'
+            f'<table class="pat-table"><tbody>{"".join(rows_html)}</tbody></table>'
+        )
+    return out
 
 
 def _volcano_render_worker(args):

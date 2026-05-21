@@ -11,10 +11,20 @@ data:
   # the LATEST test per compound, SERAC source only. Without this filter,
   # older retests of the same compound are double-counted in per-compound
   # aggregates (silently differs from baseline).
-  clean_proteomics_csv: data/MS/CDD CSV Export - 2026-04-29 06h13m33s.csv
-  # MF_features pickle holding the feature columns the model expects.
-  # inputs_multifp.pkl already has Morgan(2048) + 6 physchem + MACCS(167) + AtomPair(1317).
+  clean_proteomics_csv: data/MS/20260429_CDD_MS_SilentActive.csv
+
+  # How to obtain MF_features. Two modes:
+  #   'pickle'  — load a pre-computed multi-FP feature frame from disk.
+  #               Fast (~0 s) but assumes the pickle's compound set matches
+  #               the current chemical library snapshot.
+  #   'compute' — compute_H236_features(serac_df) live from `chemlib_csv`,
+  #               matching the FEATURES_TYPE='prevalence' branch in the
+  #               notebook's featurization cell. Slower (~30 s on 10 k cpds)
+  #               but guarantees the prevalence cut is on the same compound
+  #               population as the model will be trained / scored on.
+  features_source: pickle           # 'pickle' or 'compute'
   mf_features_pickle: autoresearch/optimizeMS_genes_R2/logs/inputs_multifp.pkl
+  chemlib_csv: data/chemical_libs/20260430_SERAC_lib.csv  # used only when features_source='compute'
 
 model:
   # Production deployable champion: single RandomForest, no SeedAvgRF averaging
@@ -82,9 +92,18 @@ parallelism:
   n_processes: 24
 
 output:
-  # CSV with the same columns as output/MS/20260505_geneSAR_R2_ctf0.4.csv:
-  #   gene, R2, nullR2, n   (sorted by R2 descending, NaN last; nullR2 = 0)
-  results_path: output/MS/20260509_geneSAR_R2_full_genome.csv
+  # CSV schema (sorted by R2 descending, NaN last):
+  #   gene, R2, nullR2, n, pearson_r, pearson_p, spearman_r, spearman_p
+  # - R2          : squared Pearson correlation between predicted and observed
+  #                 (matches stats_tools.rsquared — see SAR_prioritization.md
+  #                 for why this is Pearson² not sklearn.r2_score).
+  # - pearson_r   : *signed* Pearson r (= sqrt(R2) with a sign). Negative r
+  #                 means the model predicts the inverse of the truth.
+  # - pearson_p   : two-sided p-value for Pearson r.
+  # - spearman_r  : rank correlation between predicted and observed labels
+  #                 (robust to outliers — diverging from R2 flags outlier-anchored fits).
+  # - spearman_p  : two-sided p-value for the rank correlation.
+  results_path: output/MS/20260518_geneSAR_R2_full_genome.csv
   # Periodic flush so a crash doesn't lose all progress.
   checkpoint_every: 100
   # Skip genes already in results_path (set false to recompute everything).

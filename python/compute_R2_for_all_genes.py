@@ -33,12 +33,14 @@ import numpy as np
 import pandas as pd
 import yaml
 from joblib import parallel_config
+from scipy.stats import pearsonr, spearmanr
 from sklearn.model_selection import KFold
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent.parent / 'Scripts'
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import Statistics_tools as stats_tools  # noqa: E402
+import Rdkit_tools as rdkit_tools       # noqa: E402  (only needed for features_source='compute')
 
 
 # ---------- module-level state shared with worker processes via fork() ----------
@@ -116,6 +118,8 @@ def _compute_gene(gene: str) -> dict:
     sub = df[df['genes'] == gene]
     if len(sub) == 0:
         return {'gene': gene, 'R2': np.nan, 'nullR2': np.nan, 'n': 0,
+                'pearson_r': np.nan, 'pearson_p': np.nan,
+                'spearman_r': np.nan, 'spearman_p': np.nan,
                 'duration_s': time.time() - t0, 'note': 'no data after plate drop'}
 
     # Decide label
@@ -135,6 +139,8 @@ def _compute_gene(gene: str) -> dict:
     agg = agg.dropna(subset=['_y', '_idx'])
     if len(agg) < 20:
         return {'gene': gene, 'R2': np.nan, 'nullR2': np.nan, 'n': len(agg),
+                'pearson_r': np.nan, 'pearson_p': np.nan,
+                'spearman_r': np.nan, 'spearman_p': np.nan,
                 'duration_s': time.time() - t0,
                 'label_col': label_col, 'note': 'too few compounds (<20)'}
 
@@ -162,11 +168,33 @@ def _compute_gene(gene: str) -> dict:
         r2 = float(stats_tools.rsquared(y_true, y_pred))
     except Exception as e:
         return {'gene': gene, 'R2': np.nan, 'nullR2': np.nan, 'n': len(agg),
+                'pearson_r': np.nan, 'pearson_p': np.nan,
+                'spearman_r': np.nan, 'spearman_p': np.nan,
                 'duration_s': time.time() - t0,
                 'label_col': label_col, 'note': f'rsquared failed: {e}'}
 
+    # Pearson r + p: the *signed* version of the squared correlation in R2.
+    # Sign flips warn that the model predicts the inverse of the truth (rare
+    # but real on small / noisy gene cohorts). p is two-sided.
+    try:
+        pe_r, pe_p = pearsonr(y_true, y_pred)
+        pe_r, pe_p = float(pe_r), float(pe_p)
+    except Exception:
+        pe_r, pe_p = np.nan, np.nan
+
+    # Spearman rank correlation: complements R² with an outlier-robust signal.
+    # Big gap between r² (Pearson²) and ρ² (Spearman²) → fit is anchored on a
+    # few extreme actives. Two-sided p-value comes free with the call.
+    try:
+        sp_r, sp_p = spearmanr(y_true, y_pred)
+        sp_r, sp_p = float(sp_r), float(sp_p)
+    except Exception:
+        sp_r, sp_p = np.nan, np.nan
+
     # nullR2 = 0 — matches reference output convention (n_null=0 in compute_gene_sar_r2)
     return {'gene': gene, 'R2': r2, 'nullR2': 0, 'n': len(agg),
+            'pearson_r': pe_r, 'pearson_p': pe_p,
+            'spearman_r': sp_r, 'spearman_p': sp_p,
             'duration_s': time.time() - t0, 'label_col': label_col}
 
 
@@ -179,18 +207,30 @@ def _parse_compound_batch(molecule_batch_id: pd.Series) -> tuple[pd.Series, pd.S
 
 
 def _to_output_frame(new_results: list[dict], existing: pd.DataFrame) -> pd.DataFrame:
-    """Match the reference CSV schema: columns = gene, R2, nullR2, n.
-    Sort R² descending; NaN R² last."""
+    """Schema: gene, R2, nullR2, n, pearson_r, pearson_p, spearman_r, spearman_p.
+    Sort R² descending; NaN R² last. Older CSVs without the new corr columns
+    are gracefully upgraded (existing rows get NaN for the new cols)."""
     df_new = pd.DataFrame(new_results)
     if existing.empty:
         df = df_new
     else:
         df = pd.concat([existing, df_new], ignore_index=True)
-    # Coerce columns to the reference schema; only keep these four.
-    for col, default in [('gene', None), ('R2', np.nan), ('nullR2', 0), ('n', 0)]:
+    # Coerce columns to the reference schema; missing cols filled with default.
+    for col, default in [
+        ('gene',       None),
+        ('R2',         np.nan),
+        ('nullR2',     0),
+        ('n',          0),
+        ('pearson_r',  np.nan),
+        ('pearson_p',  np.nan),
+        ('spearman_r', np.nan),
+        ('spearman_p', np.nan),
+    ]:
         if col not in df.columns:
             df[col] = default
-    df = df[['gene', 'R2', 'nullR2', 'n']]
+    df = df[['gene', 'R2', 'nullR2', 'n',
+             'pearson_r', 'pearson_p',
+             'spearman_r', 'spearman_p']]
     df = df.sort_values('R2', ascending=False, na_position='last').reset_index(drop=True)
     return df
 
@@ -206,6 +246,21 @@ def _print_summary(df_results: pd.DataFrame):
             n = (valid['R2'] > thr).sum()
             print(f'#genes R² > {thr:>4.2f}:  {n}')
         print(f'#genes R² < 0:     {(valid["R2"] < 0).sum()}')
+        if 'pearson_r' in valid.columns and valid['pearson_r'].notna().any():
+            pe = valid['pearson_r'].dropna()
+            print(f'mean Pearson r:    {pe.mean():+.4f}')
+            print(f'median Pearson r:  {pe.median():+.4f}')
+            print(f'#genes Pearson r<0: {(valid["pearson_r"] < 0).sum()}')
+            for thr in (0.001, 0.01, 0.05):
+                n = (valid['pearson_p'] < thr).sum()
+                print(f'#genes p_P < {thr:<5g}: {n}')
+        if 'spearman_r' in valid.columns and valid['spearman_r'].notna().any():
+            sp = valid['spearman_r'].dropna()
+            print(f'mean Spearman r:   {sp.mean():+.4f}')
+            print(f'median Spearman r: {sp.median():+.4f}')
+            for thr in (0.001, 0.01, 0.05):
+                n = (valid['spearman_p'] < thr).sum()
+                print(f'#genes p_S < {thr:<5g}: {n}')
 
 
 def main():
@@ -261,13 +316,38 @@ def main():
         df = df[~df['MSPlate'].isin(drop_plates)].reset_index(drop=True)
         print(f'  dropped plates {drop_plates}: {before - len(df):,} rows removed')
 
-    # --- Load MF_features cache ---
-    mf_path = Path(cfg['data']['mf_features_pickle'])
-    print(f'Loading MF_features from {mf_path}...')
-    with open(mf_path, 'rb') as f:
-        mf_pickle = pickle.load(f)
-    mf_features = mf_pickle['MF_features']
-    print(f'  MF_features: {mf_features.shape}')
+    # --- Build / load MF_features ---
+    # Two modes — see config docstring for the trade-off.
+    features_source = cfg['data'].get('features_source', 'pickle')
+
+    if features_source == 'compute':
+        # Match the FEATURES_TYPE='prevalence' branch in baseline.ipynb /
+        # MS_TargetML.ipynb's featurization cell exactly:
+        #   compute_H236_features(serac_df) → prevalence cut applied below in
+        #   _build_feature_columns via the 'multi_fp_champion' preset.
+        chemlib_path = Path(cfg['data']['chemlib_csv'])
+        print(f'Computing MF_features live from {chemlib_path} (compute_H236_features)...')
+        serac_df = pd.read_csv(chemlib_path)
+        # Normalise to the |compound|smiles| schema compute_H236_features expects.
+        rename_map = {'Molecule Name': 'compound', 'SMILES': 'smiles'}
+        serac_df = serac_df.rename(columns=rename_map)
+        for c in ('CDD Number', 'Synonyms', 'Projects', 'project'):
+            if c in serac_df.columns:
+                serac_df = serac_df.drop(columns=[c])
+        serac_df = (serac_df[['compound', 'smiles']]
+                    .dropna()
+                    .drop_duplicates('compound')
+                    .reset_index(drop=True))
+        print(f'  chemlib: {len(serac_df):,} unique compounds')
+        mf_features = rdkit_tools.compute_H236_features(serac_df, v=True)
+        print(f'  MF_features: {mf_features.shape}')
+    else:
+        mf_path = Path(cfg['data']['mf_features_pickle'])
+        print(f'Loading MF_features from {mf_path}...')
+        with open(mf_path, 'rb') as f:
+            mf_pickle = pickle.load(f)
+        mf_features = mf_pickle['MF_features']
+        print(f'  MF_features: {mf_features.shape}')
 
     # --- Resolve features ---
     feat_cfg = cfg['features']
