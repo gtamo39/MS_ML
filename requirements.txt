@@ -32,3 +32,4 @@ shap==0.46.0   # last release supporting numpy<2; do not bump without lifting ma
 plotly>=5.20   # interactive 3D embedding (Statistics_tools.plot_multi_class_to_embedding_3d)
 nbformat>=4.2.0   # required by plotly to render inline in Jupyter
 openpyxl==3.1.5
+setuptools==80.10.2

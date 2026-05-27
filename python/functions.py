@@ -287,6 +287,93 @@ def _get_ot_score_local(df, gene_col, top_n, verbose, ot_root):
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Proteomics data loading + MS-recency filtering
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+def load_proteomics_data(
+    raw_proteomics_path,
+    clean_proteomics_path,
+    drop_plates=('Plate12', 'Plate15', 'Plate23'),
+    mode='serac',
+    collections=('AJ', 'AK'),
+    verbose=True,
+):
+    """
+    Load a raw proteomics table + its metadata table, then filter the raw rows
+    to the latest/selected screen per compound with the noisy plates removed.
+    Returns ``(df_raw, MS)``.
+
+    The raw side is identical across data tranches; only the metadata recipe
+    differs, switched by ``mode``:
+
+      * ``mode='serac'`` (default) — clean CDD MS export. Drop ``CDD Number``,
+        keep ``Source == 'SERAC'``, parse the screen date, and for compounds
+        screened more than once keep only the latest-dated row (one per
+        ``Molecule Name``). Join key:
+        ``MSData - Proteomics activities: Molecule-Batch ID``.
+      * ``mode='cddvault'`` — CDD Vault export. Rename ``SMILES`` → ``smiles``
+        and keep only the ``collections`` of interest (drops PROTACs).
+        Join key: ``Batch Molecule-Batch ID``.
+
+    Common to both: read the raw table, split ``MoleculeBatchID``
+    (``SRB-0000385-001``) into ``compound`` + ``batch``, drop ``drop_plates``
+    by ``MSPlate`` (a GLOBAL rule — never per-gene), then keep only the
+    molecule-batches present in the metadata table.
+
+    :param str raw_proteomics_path: raw per-(compound, gene) CSV; needs
+        ``MoleculeBatchID`` and ``MSPlate`` columns.
+    :param str clean_proteomics_path: metadata CSV (schema depends on ``mode``).
+    :param list drop_plates: plate IDs removed from the raw table before filtering.
+    :param str mode: ``'serac'`` or ``'cddvault'`` — selects the metadata recipe.
+    :param list collections: ``cddvault`` mode only — Collections to keep.
+    :param bool verbose: print aggregate diagnostics (counts, shapes) — no
+        per-compound rows are printed.
+
+    :return: ``(df_raw, MS)`` — filtered raw table and the metadata table.
+    """
+    # --- Raw table (common to all tranches) ---
+    df_raw = pd.read_csv(raw_proteomics_path)
+    parts = df_raw['MoleculeBatchID'].str.split('-', n=2, expand=True)
+    df_raw['compound'] = parts[0] + '-' + parts[1]   # 'SRB-0000385'
+    df_raw['batch']    = parts[2]                    # '001'
+
+    # --- Metadata table (recipe depends on `mode`) ---
+    if mode == 'serac':
+        MS = pd.read_csv(clean_proteomics_path).drop(['CDD Number'], axis=1)
+        MS = MS[MS['MSData - Proteomics activities: Source'] == 'SERAC']
+        MS['MSData - Proteomics activities: Date'] = pd.to_datetime(
+            MS['MSData - Proteomics activities: Date'])
+        # If a compound is tested multiple times, keep only the latest date.
+        MS = MS.sort_values('MSData - Proteomics activities: Date',
+                            ascending=False).reset_index()
+        MS = MS.groupby('Molecule Name').first().reset_index()
+        batch_col = 'MSData - Proteomics activities: Molecule-Batch ID'
+    elif mode == 'cddvault':
+        MS = pd.read_csv(clean_proteomics_path).rename(columns={'SMILES': 'smiles'})
+        MS = MS[MS['Collections'].isin(list(collections))]   # drop PROTACs
+        batch_col = 'Batch Molecule-Batch ID'
+    else:
+        raise ValueError(f"mode must be 'serac' or 'cddvault', got {mode!r}")
+
+    if verbose:
+        print(f'> mode={mode} | MS rows: {len(MS):,} | join key: {batch_col}')
+        if mode == 'serac':
+            print('>', MS['Molecule Name'].nunique(), 'unique compounds')
+            print('> Ligase(s)', list(MS['MSData - Proteomics activities: Ligase'].unique()))
+            print('> Cellline', list(MS['MSData - Proteomics activities: Cell line'].unique()))
+        else:
+            print('> Collections kept:', list(collections))
+
+    # --- Drop noisy plates (GLOBAL rule) + keep only molecule-batches in MS ---
+    df_raw = df_raw[~df_raw['MSPlate'].isin(list(drop_plates))]
+    df_raw = df_raw[df_raw['MoleculeBatchID'].isin(MS[batch_col])]
+    if verbose:
+        print('> df_raw dim:', df_raw.shape)
+
+    return df_raw, MS
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 3D target-prioritisation scatter (R² × overall_score × MCS fold-enrichment)
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
