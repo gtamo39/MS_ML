@@ -31,8 +31,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yaml
 from joblib import parallel_config
+# NOTE: `yaml` is imported lazily inside main() — it's only needed by the CLI
+# config path, so notebooks can `import compute_R2_for_all_genes` to reuse
+# compute_gene_R2() without pyyaml installed in their env.
 from scipy.stats import pearsonr, spearmanr
 from sklearn.model_selection import KFold
 
@@ -108,12 +110,33 @@ def _init_worker(df, compound_index, feature_matrix, model_cls, model_params,
     _STATE['n_jobs']         = n_jobs
 
 
-def _compute_gene(gene: str) -> dict:
-    """5-fold CV R² for one gene. Reads shared state."""
+def compute_gene_R2(gene, df, compound_index, feature_matrix, model_cls,
+                    model_params, raw_label_genes, folds=5, seed=0, n_jobs=1):
+    """5-fold compound-split CV R² (+ Pearson/Spearman r,p) for one gene.
+
+    SINGLE SOURCE OF TRUTH for the per-gene metric — called both by the CLI
+    worker ``_compute_gene`` (full-genome screen, via module-level ``_STATE``)
+    and directly by notebooks (in-memory ``df_raw`` + ``MF_features``), so the
+    two paths can never drift apart (e.g. the notebook silently dropping the
+    correlation columns).
+
+    Winsorisation is handled HERE per ``raw_label_genes`` (raw ``logfc`` for
+    that set, per-gene 1-99% clip otherwise) — callers pass raw ``df`` with a
+    ``logfc`` column and do NOT pre-clip.
+
+    :param str gene: gene symbol to filter ``df['genes']`` on.
+    :param df df: must have ``genes``, ``compound``, ``logfc``.
+    :param dict compound_index: compound → row index into ``feature_matrix``.
+    :param np.ndarray feature_matrix: (n_compounds, n_features) dense float matrix.
+    :param type model_cls: e.g. ``RandomForestRegressor``; fresh instance per fold.
+    :param dict model_params: kwargs for the model constructor.
+    :param set raw_label_genes: genes that use raw ``logfc`` (skip winsorize).
+    :param int folds: CV folds. :param int seed: KFold + model random_state.
+    :param int n_jobs: threads for the model + joblib backend.
+    :return dict: ``{gene, R2, nullR2, n, pearson_r, pearson_p, spearman_r,
+        spearman_p, duration_s, label_col[, note]}``.
+    """
     t0 = time.time()
-    df = _STATE['df']
-    compound_index = _STATE['compound_index']
-    feat_matrix    = _STATE['feature_matrix']
 
     sub = df[df['genes'] == gene]
     if len(sub) == 0:
@@ -123,7 +146,7 @@ def _compute_gene(gene: str) -> dict:
                 'duration_s': time.time() - t0, 'note': 'no data after plate drop'}
 
     # Decide label
-    if gene in _STATE['raw_label_genes']:
+    if gene in raw_label_genes:
         label_col = 'logfc'
         labels = sub['logfc'].values
     else:
@@ -144,19 +167,19 @@ def _compute_gene(gene: str) -> dict:
                 'duration_s': time.time() - t0,
                 'label_col': label_col, 'note': 'too few compounds (<20)'}
 
-    X = feat_matrix[agg['_idx'].astype(int).values]
+    X = feature_matrix[agg['_idx'].astype(int).values]
     y = agg['_y'].values
 
-    kf = KFold(n_splits=_STATE['folds'], shuffle=True, random_state=_STATE['seed'])
+    kf = KFold(n_splits=folds, shuffle=True, random_state=seed)
     y_true_all, y_pred_all = [], []
     # threading backend nests fine inside multiprocessing workers (loky doesn't —
     # it silently degrades to n_jobs=1 with a warning).
-    with parallel_config(backend='threading', n_jobs=_STATE['n_jobs']):
+    with parallel_config(backend='threading', n_jobs=n_jobs):
         for tr_idx, te_idx in kf.split(X):
-            model = _STATE['model_cls'](
-                **_STATE['model_params'],
-                n_jobs=_STATE['n_jobs'],
-                random_state=_STATE['seed'],
+            model = model_cls(
+                **model_params,
+                n_jobs=n_jobs,
+                random_state=seed,
             )
             model.fit(X[tr_idx], y[tr_idx])
             y_pred_all.append(model.predict(X[te_idx]))
@@ -196,6 +219,23 @@ def _compute_gene(gene: str) -> dict:
             'pearson_r': pe_r, 'pearson_p': pe_p,
             'spearman_r': sp_r, 'spearman_p': sp_p,
             'duration_s': time.time() - t0, 'label_col': label_col}
+
+
+def _compute_gene(gene: str) -> dict:
+    """CLI-worker wrapper: reads shared fork()-inherited ``_STATE`` and delegates
+    to :func:`compute_gene_R2` (the single source of truth for the metric)."""
+    return compute_gene_R2(
+        gene,
+        df=_STATE['df'],
+        compound_index=_STATE['compound_index'],
+        feature_matrix=_STATE['feature_matrix'],
+        model_cls=_STATE['model_cls'],
+        model_params=_STATE['model_params'],
+        raw_label_genes=_STATE['raw_label_genes'],
+        folds=_STATE['folds'],
+        seed=_STATE['seed'],
+        n_jobs=_STATE['n_jobs'],
+    )
 
 
 def _parse_compound_batch(molecule_batch_id: pd.Series) -> tuple[pd.Series, pd.Series]:
@@ -268,6 +308,7 @@ def main():
     ap.add_argument('--config', required=True, help='YAML config path')
     args = ap.parse_args()
 
+    import yaml   # lazy: CLI-only dependency (see import note at top of module)
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 

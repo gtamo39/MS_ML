@@ -1,6 +1,6 @@
 ipykernel>=6.25.2
 ipython>=8.15.0
-numpy>=1.24.4
+numpy>=1.24.4,<2   # cap <2: shap 0.46.0 (below) needs numpy<2; stops a stray pip install pulling numpy 2.x
 pandas>=2.0.3
 matplotlib<3.8
 seaborn==0.13.2
@@ -33,3 +33,4 @@ plotly>=5.20   # interactive 3D embedding (Statistics_tools.plot_multi_class_to_
 nbformat>=4.2.0   # required by plotly to render inline in Jupyter
 openpyxl==3.1.5
 setuptools==80.10.2
+pyarrow>=14,<18   # parquet engine for pandas.read_parquet (used by OT_CACHE)

@@ -333,6 +333,9 @@ def load_proteomics_data(
     """
     # --- Raw table (common to all tranches) ---
     df_raw = pd.read_csv(raw_proteomics_path)
+    if mode == 'cddvault':
+        # Database export names this column 'unique'; match the earlier tranche.
+        df_raw = df_raw.rename(columns={'unique': 'uniquecontrast'})
     parts = df_raw['MoleculeBatchID'].str.split('-', n=2, expand=True)
     df_raw['compound'] = parts[0] + '-' + parts[1]   # 'SRB-0000385'
     df_raw['batch']    = parts[2]                    # '001'
@@ -350,8 +353,18 @@ def load_proteomics_data(
         batch_col = 'MSData - Proteomics activities: Molecule-Batch ID'
     elif mode == 'cddvault':
         MS = pd.read_csv(clean_proteomics_path).rename(columns={'SMILES': 'smiles'})
-        MS = MS[MS['Collections'].isin(list(collections))]   # drop PROTACs
-        batch_col = 'Batch Molecule-Batch ID'
+        # Collections filtering deliberately dropped — PROTAC removal is now done upstream
+        # via the AJ/AK-filtered serac_df; the inner merge with serac_df downstream will
+        # drop anything not in those collections. Lets this mode work on stripped Vault
+        # exports that lack the Collections column (e.g. the 20260529 tranche).
+        # The `collections` arg above is kept for backwards compat but is now unused.
+        # Join-key column varies across Vault exports — auto-detect.
+        _batch_candidates = ['Batch Molecule-Batch ID', 'Molecule-Batch ID',
+                             'MSData - Proteomics activities: Molecule-Batch ID']
+        batch_col = next((c for c in _batch_candidates if c in MS.columns), None)
+        assert batch_col is not None, (
+            f"no Molecule-Batch ID column found in {clean_proteomics_path}; "
+            f"expected one of {_batch_candidates}")
     else:
         raise ValueError(f"mode must be 'serac' or 'cddvault', got {mode!r}")
 
@@ -924,13 +937,15 @@ def plot_target_3d(
             import joblib as _joblib
             from joblib import Parallel, delayed
             unique_cmps = sorted({c for _, c, _ in tasks})
-            sub_cache = {
-                c: df_raw[df_raw['compound'] == c]
-                       [['compound', 'genes', 'logfc', 'pvalue']].dropna()
-                for c in unique_cmps
-            }
-            print(f'> pre-sliced df_raw for {len(unique_cmps):,} compounds; '
-                  f'rendering {n_expected:,} volcanoes on {volcano_n_jobs} workers...')
+            print(f'> pre-slicing df_raw for {len(unique_cmps):,} compounds '
+                  f'(one groupby pass, was 300x boolean filters)...', flush=True)
+            # single O(n) pass instead of one boolean filter per compound — the
+            # old loop was the dominant cost when df_raw has millions of rows.
+            _cols = ['compound', 'genes', 'logfc', 'pvalue']
+            _filt = df_raw.loc[df_raw['compound'].isin(unique_cmps), _cols].dropna()
+            sub_cache = {c: g for c, g in _filt.groupby('compound', sort=False)}
+            print(f'> rendering {n_expected:,} volcanoes on {volcano_n_jobs} workers...',
+                  flush=True)
 
             @contextlib.contextmanager
             def _tqdm_joblib(pbar):
@@ -1475,100 +1490,101 @@ def cumulative_plate_ablation(
     return df
 
 
-def compute_gene_sar_r2(
-    gene, df_raw, features,
-    *,
-    label_col='logfc',
-    model_class=None,
-    model_params=None,
-    min_compounds=100,
-    n_null=0,
-    n_jobs=8,
-    seed=0,
-    ML_Reg_module=None,
-    verbose=False,
-):
-    """
-    5-fold cross-validated SAR predictability for one gene.
-
-    Filters ``df_raw`` to the gene, aggregates ``label_col`` per compound (mean
-    across replicates), merges with ``features`` on ``compound``, and runs the
-    project's K-fold CV harness to get an R². Optionally repeats with shuffled
-    labels ``n_null`` times to estimate the mean of the null distribution.
-
-    The returned dict matches the SAR-screen CSV header verbatim, so a caller
-    can do ``writer.writerow(result)`` with no transformation. Skipped genes
-    (``n <= min_compounds``) return NaN R²/nullR² with the actual compound
-    count, so the caller's resume-set still includes them and they don't get
-    retried on the next pass.
-
-    :param str gene: gene symbol to filter ``df_raw['genes']`` on
-    :param df df_raw: must have ``genes``, ``compound``, and ``label_col``
-    :param df features: molecular features keyed by ``compound``
-    :param str label_col: which column to predict (e.g. ``'logfc'`` or ``'logfc_corrected'``)
-    :param type model_class: e.g. ``RandomForestRegressor``; instantiated fresh per call
-    :param dict model_params: kwargs for the model constructor
-    :param int min_compounds: skip if compounds-after-merge ≤ this
-    :param int n_null: label-shuffle permutations for null R²; 0 = skip
-    :param int n_jobs: passed as ``n_jobs`` to the model
-    :param int seed: passed as ``random_state`` to the model
-    :param module ML_Reg_module: project's CV harness, passed in to avoid hard imports
-    :return dict: ``{'gene', 'R2', 'nullR2', 'n'}``
-    """
-    if model_class is None:
-        raise ValueError('pass model_class (e.g. RandomForestRegressor)')
-    if ML_Reg_module is None:
-        raise ValueError('pass ML_Reg_module so we use the same CV harness as the notebook')
-    if model_params is None:
-        model_params = {}
-
-    sub = df_raw[df_raw['genes'] == gene]
-    if sub.empty:
-        return {'gene': gene, 'R2': float('nan'), 'nullR2': float('nan'), 'n': 0}
-
-    agg = (sub.groupby('compound')[label_col].mean()
-              .reset_index()
-              .dropna(subset=[label_col])
-              .rename(columns={label_col: 'label'}))
-
-    ML_data = pd.merge(features, agg, on='compound').dropna()
-    n = len(ML_data)
-
-    if n <= min_compounds:
-        if verbose:
-            print(f'  [skip] {gene}: only {n} compounds (min_compounds={min_compounds})')
-        return {'gene': gene, 'R2': float('nan'), 'nullR2': float('nan'), 'n': n}
-
-    def _new_model():
-        # fresh instance per call so RF/XGB internal state never leaks between fits
-        return model_class(**{**model_params, 'n_jobs': n_jobs, 'random_state': seed})
-
-    _, df_pred = ML_Reg_module.run_K_Fold_Xval_Regression(
-        ML_data, model=_new_model(),
-        col_to_rm=['compound', 'label'], ID='compound',
-        get_ints=False, v=False, to_impute=None, rm_empty_cols=False,
-    )
-    R2 = ML_Reg_module.get_reg_metrics_from_preddf(df_pred, v=False)['r2']
-
-    null_R2 = float('nan')
-    if n_null > 0:
-        rng = np.random.default_rng(seed)
-        nulls = []
-        for _ in range(n_null):
-            shuffled = ML_data.copy()
-            shuffled['label'] = rng.permutation(shuffled['label'].values)
-            _, df_pred_null = ML_Reg_module.run_K_Fold_Xval_Regression(
-                shuffled, model=_new_model(),
-                col_to_rm=['compound', 'label'], ID='compound',
-                get_ints=False, v=False, to_impute=None, rm_empty_cols=False,
-            )
-            nulls.append(ML_Reg_module.get_reg_metrics_from_preddf(df_pred_null, v=False)['r2'])
-        null_R2 = float(np.mean(nulls))
-
-    if verbose:
-        print(f'  {gene}: R²={R2:.3f}  null={null_R2:.3f}  n={n}')
-
-    return {'gene': gene, 'R2': float(R2), 'nullR2': null_R2, 'n': n}
+# --- DEPRECATED 2026-05-19: superseded by compute_R2_for_all_genes.compute_gene_R2 (single source of truth). Commented out pending confirmation of the new path; remove after verifying. ---
+# def compute_gene_sar_r2(
+#     gene, df_raw, features,
+#     *,
+#     label_col='logfc',
+#     model_class=None,
+#     model_params=None,
+#     min_compounds=100,
+#     n_null=0,
+#     n_jobs=8,
+#     seed=0,
+#     ML_Reg_module=None,
+#     verbose=False,
+# ):
+#     """
+#     5-fold cross-validated SAR predictability for one gene.
+#
+#     Filters ``df_raw`` to the gene, aggregates ``label_col`` per compound (mean
+#     across replicates), merges with ``features`` on ``compound``, and runs the
+#     project's K-fold CV harness to get an R². Optionally repeats with shuffled
+#     labels ``n_null`` times to estimate the mean of the null distribution.
+#
+#     The returned dict matches the SAR-screen CSV header verbatim, so a caller
+#     can do ``writer.writerow(result)`` with no transformation. Skipped genes
+#     (``n <= min_compounds``) return NaN R²/nullR² with the actual compound
+#     count, so the caller's resume-set still includes them and they don't get
+#     retried on the next pass.
+#
+#     :param str gene: gene symbol to filter ``df_raw['genes']`` on
+#     :param df df_raw: must have ``genes``, ``compound``, and ``label_col``
+#     :param df features: molecular features keyed by ``compound``
+#     :param str label_col: which column to predict (e.g. ``'logfc'`` or ``'logfc_corrected'``)
+#     :param type model_class: e.g. ``RandomForestRegressor``; instantiated fresh per call
+#     :param dict model_params: kwargs for the model constructor
+#     :param int min_compounds: skip if compounds-after-merge ≤ this
+#     :param int n_null: label-shuffle permutations for null R²; 0 = skip
+#     :param int n_jobs: passed as ``n_jobs`` to the model
+#     :param int seed: passed as ``random_state`` to the model
+#     :param module ML_Reg_module: project's CV harness, passed in to avoid hard imports
+#     :return dict: ``{'gene', 'R2', 'nullR2', 'n'}``
+#     """
+#     if model_class is None:
+#         raise ValueError('pass model_class (e.g. RandomForestRegressor)')
+#     if ML_Reg_module is None:
+#         raise ValueError('pass ML_Reg_module so we use the same CV harness as the notebook')
+#     if model_params is None:
+#         model_params = {}
+#
+#     sub = df_raw[df_raw['genes'] == gene]
+#     if sub.empty:
+#         return {'gene': gene, 'R2': float('nan'), 'nullR2': float('nan'), 'n': 0}
+#
+#     agg = (sub.groupby('compound')[label_col].mean()
+#               .reset_index()
+#               .dropna(subset=[label_col])
+#               .rename(columns={label_col: 'label'}))
+#
+#     ML_data = pd.merge(features, agg, on='compound').dropna()
+#     n = len(ML_data)
+#
+#     if n <= min_compounds:
+#         if verbose:
+#             print(f'  [skip] {gene}: only {n} compounds (min_compounds={min_compounds})')
+#         return {'gene': gene, 'R2': float('nan'), 'nullR2': float('nan'), 'n': n}
+#
+#     def _new_model():
+#         # fresh instance per call so RF/XGB internal state never leaks between fits
+#         return model_class(**{**model_params, 'n_jobs': n_jobs, 'random_state': seed})
+#
+#     _, df_pred = ML_Reg_module.run_K_Fold_Xval_Regression(
+#         ML_data, model=_new_model(),
+#         col_to_rm=['compound', 'label'], ID='compound',
+#         get_ints=False, v=False, to_impute=None, rm_empty_cols=False,
+#     )
+#     R2 = ML_Reg_module.get_reg_metrics_from_preddf(df_pred, v=False)['r2']
+#
+#     null_R2 = float('nan')
+#     if n_null > 0:
+#         rng = np.random.default_rng(seed)
+#         nulls = []
+#         for _ in range(n_null):
+#             shuffled = ML_data.copy()
+#             shuffled['label'] = rng.permutation(shuffled['label'].values)
+#             _, df_pred_null = ML_Reg_module.run_K_Fold_Xval_Regression(
+#                 shuffled, model=_new_model(),
+#                 col_to_rm=['compound', 'label'], ID='compound',
+#                 get_ints=False, v=False, to_impute=None, rm_empty_cols=False,
+#             )
+#             nulls.append(ML_Reg_module.get_reg_metrics_from_preddf(df_pred_null, v=False)['r2'])
+#         null_R2 = float(np.mean(nulls))
+#
+#     if verbose:
+#         print(f'  {gene}: R²={R2:.3f}  null={null_R2:.3f}  n={n}')
+#
+#     return {'gene': gene, 'R2': float(R2), 'nullR2': null_R2, 'n': n}
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
