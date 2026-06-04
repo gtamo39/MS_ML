@@ -1,0 +1,43 @@
+# Project parameters — single source of truth across all MS_ML notebooks.
+# Loaded in each notebook's params cell via yaml.safe_load + globals().update(),
+# so both `config.RAW_PROTEOMICS_PATH` and bare `RAW_PROTEOMICS_PATH` work.
+# Conflicting keys were unified to the MS_TargetML (most recent) values.
+
+ACTIVE_C: '#008bfb'
+SILENT_C: '#ff0051'
+
+PATENTS_RAW: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/5_Literature and Patents/0_Companies/Pharma_SmallMolecule_Patents_MASTER.xlsx
+DROPBOX_PROT: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/12_Proteomics/5_Inventory/CDDVault/Proteomics/GiorgioTamo/
+DROPBOX_ML: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/
+DROPBOX_VALIDATION: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/Daniela/20260518_ML_selected_genes_DF.csv
+DOWNLOADS: /mnt/c/Users/gtamo/Downloads
+
+RAW_PROTEOMICS_PATH: data/MS/20260424_Proteomics_Database_CSV_Export.csv
+CLEAN_PROTEOMICS_PATH: data/MS/20260429_CDD_MS_SilentActive.csv
+
+PX_20260520_CDDVAULT: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/Daniela/20260519_FBXOscreening/20260520_Proteomics_CDDVault_Export.csv
+PX_20260520_DB: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/Daniela/20260519_FBXOscreening/20260520_Proteomics_Database_CSV_Export.csv
+PX_20260529_CDDVAULT: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/Daniela/20260529_FBXOscreening/20260529_Proteomics_CDDVault_Export.csv
+PX_20260529_DB: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/Daniela/20260529_FBXOscreening/20260529_Proteomics_Database_CSV_Export.csv
+PX_SCREEN_LIB: data/MS/20260513_CDD_FBXO31_PxScreen_Source.csv
+
+ENAMINE_20260513: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/virtual libraries/enum_NAr-pyrimidine_Enamine 4.sdf
+CYTONM: AUC
+CYTODATA: data/cytotox/20260602_AUC_cytotox.csv
+CYTOINFO: data/cytotox/cellline_info.xlsx
+DEPMAP_DIR: data/external/depmap/
+
+CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
+OT_ROOT: data/external/opentarget
+PHARMA_PATENT_CSV: data/patent/20260528_pharma_sm.csv
+BMS_GENES: data/patent/BMS_Pipeline_genes.csv
+OT_CACHE: output/MS/opentargets_target_disease.parquet
+GENE_SAR_OUT: output/MS/20260529_geneSAR_R2_full_genome.csv
+MCS_CSV: output/MS/20260505_target_final_mcs.csv
+ML_MODEL_OUTPUT: output/ML/trained_models/20260513
+CM2RM:
+- SRB-0005653
+FEATURES_TYPE: prevalence
+PHARMA_R2_CUTOFF: 0.08
+MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
+CHEMLIB_OVERWRITE: false

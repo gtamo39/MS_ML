@@ -386,6 +386,162 @@ def load_proteomics_data(
     return df_raw, MS
 
 
+def plot_activity_rate_by_tranche(MS, date_col='date', activity_col='activity',
+                                  silent_label='Silent', colors=None,
+                                  annotate=True, ax=None, dpi=150):
+    """
+    Bar plot of per-tranche MS activity rate = fraction of compounds that are
+    ACTIVE (``activity != silent_label``), one bar per screening tranche, ordered
+    chronologically by date.
+
+    Expects the unified MS table, one row per compound-tranche, e.g.::
+
+        compound      ndown  origin       activity      date
+        SRB-0000385   3.0    MS20260429   Low (2-10)    2026-04-29
+
+    Tranches are grouped by ``date`` (parsed to datetime, sorted ascending). Each
+    bar shows the activity rate (%) inside and the compound count ``n`` on top.
+
+    :param df MS: unified MS metadata (compound | ndown | origin | activity | date).
+    :param str date_col: tranche-date column (parsed with ``pd.to_datetime``).
+    :param str activity_col: categorical activity column; auto-falls back to the
+        first column containing 'activity' if ``activity_col`` is absent.
+    :param str silent_label: the inactive label (everything else counts as active).
+    :param list colors: per-bar colours (extended/truncated to the #tranches).
+    :param bool annotate: draw rate-inside + n-on-top labels.
+    :param ax: optional matplotlib axes; created if None.
+    :param int dpi: figure resolution (only used when ``ax`` is None; default 150).
+    :return: ``(ax, summary)`` — axes and a per-tranche DataFrame
+        (``date, n, n_active, activity_rate``).
+    """
+    import matplotlib.pyplot as plt
+
+    df = MS.copy()
+    if activity_col not in df.columns:
+        activity_col = next((c for c in df.columns if 'activity' in c.lower()),
+                            activity_col)
+    df[date_col] = pd.to_datetime(df[date_col])
+
+    summary = (df.groupby(date_col)
+                 .agg(n=(activity_col, 'size'),
+                      n_active=(activity_col, lambda s: int((s != silent_label).sum())))
+                 .reset_index()
+                 .sort_values(date_col))
+    summary['activity_rate'] = summary['n_active'] / summary['n']
+
+    labels = [d.strftime('%Y-%m-%d') for d in summary[date_col]]
+    rates  = summary['activity_rate'].values
+    ns     = summary['n'].values
+
+    if colors is None:
+        colors = ['#ff0051', 'pink', 'lightblue', '#0003fb', 'purple']
+    colors = (list(colors) * (len(rates) // len(colors) + 1))[:len(rates)]
+
+    if ax is None:
+        _, ax = plt.subplots(dpi=dpi, figsize=(1.6 * len(rates) + 1, 5))
+    bars = ax.bar(labels, rates, width=0.8, color=colors, edgecolor='black')
+
+    # clean "nice barplot" aesthetics (despine + light horizontal grid)
+    for sp in ('top', 'right', 'left'):
+        ax.spines[sp].set_visible(False)
+    ax.spines['bottom'].set_color('grey')
+    ax.set_axisbelow(True)
+    ax.yaxis.grid(True, color='#EEEEEE')
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel('activity rate (fraction active)')
+    ax.set_title('MS activity rate by tranche')
+
+    if annotate:
+        for bar, r, n in zip(bars, rates, ns):
+            x = bar.get_x() + bar.get_width() / 2
+            ax.text(x, r / 2, f'{r:.1%}', ha='center', va='center', fontsize=9,
+                    weight='bold', color='black',
+                    bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
+            ax.text(x, r + 0.015, f'n={n:,}', ha='center', va='bottom',
+                    fontsize=8, color='#333')
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+    return ax, summary
+
+
+def plot_activity_composition_over_time(
+        MS, date_col='date', activity_col='activity',
+        cats=('Silent', 'Single (1)', 'Low (2-10)', 'Medium (11-25)', 'High (>25)'),
+        colors=('#d8cdbf', '#c9b79a', '#88a06a', '#d99a3a', '#b8412f'),
+        silent_label='Silent', show_rate_line=True, dpi=150, ax=None):
+    """
+    100%-stacked area of MS activity-category composition across screening tranches
+    (x = tranche date) — the "shift toward signal" view. Right-axis labels = the
+    categories; each x-tick shows the date with the compound count ``n=`` beneath;
+    an optional bold line tracks the activity rate (non-silent share).
+
+    Expects the unified MS table, one row per compound-tranche::
+
+        compound      ndown  origin       activity      date
+        SRB-0000385   3.0    MS20260429   Low (2-10)    2026-04-29
+
+    :param df MS: unified MS metadata.
+    :param str date_col: tranche-date column (parsed with ``pd.to_datetime``).
+    :param str activity_col: categorical activity column; auto-falls back to the
+        first column containing 'activity'.
+    :param cats: category order, BOTTOM → TOP of the stack.
+    :param colors: per-category fill colours (same length/order as ``cats``).
+    :param str silent_label: inactive label (used for the activity-rate line).
+    :param bool show_rate_line: overlay the non-silent activity-rate line.
+    :param int dpi: figure resolution (only used when ``ax`` is None; default 150).
+    :param ax: optional matplotlib axes.
+    :return: ``(ax, summary)`` — axes and a per-tranche DataFrame indexed by date
+        with an ``n`` column and one share column per category.
+    """
+    import matplotlib.pyplot as plt
+    cats = list(cats); colors = list(colors)
+
+    df = MS.copy()
+    if activity_col not in df.columns:
+        activity_col = next((c for c in df.columns if 'activity' in c.lower()),
+                            activity_col)
+    df[date_col] = pd.to_datetime(df[date_col])
+
+    grp   = df.groupby(date_col)
+    dates = sorted(grp.groups)
+    ns    = [len(grp.get_group(d)) for d in dates]
+    shares = np.zeros((len(cats), len(dates)))
+    for j, d in enumerate(dates):
+        vc  = grp.get_group(d)[activity_col].value_counts(normalize=True)
+        col = np.array([vc.get(c, 0.0) for c in cats])
+        shares[:, j] = col / col.sum() if col.sum() else col
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(1.8 * len(dates) + 3, 5.5), dpi=dpi)
+    ax.stackplot(dates, shares, colors=colors, labels=cats,
+                 edgecolor='white', linewidth=0.6)
+
+    if show_rate_line:
+        rate = 1 - shares[cats.index(silent_label)]
+        ax.plot(dates, rate, color='#5b2a86', lw=3.5, marker='o', ms=5,
+                label='activity rate (non-silent)')
+
+    ax.set_ylim(0, 1); ax.set_xlim(min(dates), max(dates))
+    ax.set_yticks([0, .25, .5, .75, 1])
+    ax.set_yticklabels(['0%', '25%', '50%', '75%', '100%'])
+    ax.set_ylabel('share'); ax.set_xlabel('MS tranche')
+    ax.set_xticks(dates)
+    ax.set_xticklabels([f'{pd.Timestamp(d):%Y-%m-%d}\nn={n:,}'
+                        for d, n in zip(dates, ns)])
+    ax.set_title('A shift toward signal — MS activity composition over tranches',
+                 fontsize=13)
+
+    # right-axis category labels at each band's mid-height in the LAST tranche
+    last = shares[:, -1]; mids = np.cumsum(last) - last / 2
+    axr = ax.twinx(); axr.set_ylim(0, 1); axr.set_yticks(mids)
+    axr.set_yticklabels([c.upper() for c in cats]); axr.tick_params(length=0)
+
+    ax.legend(loc='upper left', bbox_to_anchor=(1.28, 1.0), frameon=False, fontsize=8)
+
+    summary = pd.DataFrame(shares.T, index=[pd.Timestamp(d) for d in dates], columns=cats)
+    summary.insert(0, 'n', ns); summary.index.name = date_col
+    return ax, summary
+
+
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # 3D target-prioritisation scatter (R² × overall_score × MCS fold-enrichment)
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -648,6 +804,645 @@ _HOVER_INJECT = '''
     document.addEventListener("keydown", function(e) {
       if (e.key === "Escape" && pinned) unpin();
     });
+  });
+</script>
+'''
+
+
+# JS/HTML injected by plot_3d_interface. Diverges from _HOVER_INJECT by adding
+# a paginated compound panel (◀ / ▶ to walk all compounds for a target, K per
+# page) and an axis legend driven by window.__AXIS_LABELS__ instead of the
+# hard-coded R²/overall_score/MCS text. Kept separate so plot_target_3d is
+# unaffected.
+_INTERFACE_INJECT = '''
+<style>
+  html, body { height: 100%; margin: 0; padding: 0; background: white; }
+  body { display: flex; align-items: center; justify-content: center; }
+  .plotly-graph-div, .js-plotly-plot {
+    width: 96vw !important; height: 94vh !important; margin: 0 auto !important;
+  }
+  #hover-img { position: fixed; top: 12px; right: 12px; z-index: 9999;
+               background: white; border: 1px solid #bbb; padding: 6px;
+               border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+               display: none; font: 11px sans-serif; color: #333;
+               max-height: 92vh; overflow-y: auto; max-width: 96vw;
+               user-select: text; }
+  #hover-img.pinned { border-color: #1D3557; border-width: 2px; padding: 5px;
+                      box-shadow: 0 4px 14px rgba(0,0,0,0.25); }
+  #hover-img .row { display: flex; flex-direction: row; gap: 6px;
+                    align-items: flex-start; flex-wrap: wrap; }
+  #hover-img .cell { display: flex; flex-direction: column; align-items: center;
+                     border: 1px solid #eee; border-radius: 4px; padding: 3px; }
+  #hover-img .cell img { display: block; width: 170px; height: 110px;
+                         object-fit: contain;
+                         user-select: none; -webkit-user-drag: none; pointer-events: none; }
+  #hover-img .cell .noimg { width: 170px; height: 110px; display: flex;
+                            align-items: center; justify-content: center;
+                            color: #bbb; font-style: italic; }
+  #hover-img .cell .cap { padding-top: 2px; max-width: 170px; word-wrap: break-word;
+                          text-align: center; line-height: 1.25;
+                          user-select: text; cursor: text; }
+  #hover-img .cell .cap b { user-select: all; }
+  #hover-img .cell .sub { color: #777; font-size: 9px; }
+  #hover-img .cell .pl  { color: #1D3557; font-size: 9px; }
+  #hover-img .cell { cursor: pointer; }
+  /* Click-pinned compound — its volcano(s) stay shown while you scroll. */
+  #hover-img .cell.vpin { border-color: #1D3557;
+                          box-shadow: 0 0 0 1px #1D3557 inset; background: #f3f6fb; }
+  #hover-img .header { display: flex; align-items: center; gap: 8px;
+                       padding-bottom: 4px; }
+  #hover-img .gene { font-weight: 600; text-align: left; user-select: text; }
+  #hover-img .meta { color: #555; font-size: 10px; font-family: ui-monospace, monospace;
+                     user-select: text; flex: 1; }
+  #hover-img .hint { color: #999; font-size: 10px; font-style: italic; }
+  #hover-img.pinned .hint { display: none; }
+  #hover-img .close { display: none; cursor: pointer; font-size: 16px;
+                      color: #888; padding: 0 6px; border-radius: 3px;
+                      user-select: none; line-height: 1; }
+  #hover-img.pinned .close { display: inline-block; }
+  #hover-img .close:hover { background: #eee; color: #333; }
+  #hover-img .pager { display: none; align-items: center; justify-content: center;
+                      gap: 10px; padding: 2px 0 6px 0; }
+  #hover-img .pager .pg-btn { cursor: pointer; user-select: none; font-size: 15px;
+                              color: #1D3557; padding: 0 8px; border-radius: 4px;
+                              border: 1px solid #cdd6e0; line-height: 1.6; }
+  #hover-img .pager .pg-btn:hover { background: #eef2f7; }
+  #hover-img .pager .pg-btn.disabled { color: #ccc; border-color: #eee;
+                                       cursor: default; background: none; }
+  #hover-img .pager .pg-ind { font-size: 11px; color: #555; min-width: 150px;
+                              text-align: center; }
+  #hover-img .empty { color: #999; font-style: italic; padding: 6px 2px; }
+  #hover-img .volcano { display: none; margin-top: 6px; text-align: center; }
+  #hover-img .volcano .vlabel { font-size: 10px; color: #555; margin: 4px 0 2px 0; }
+  #hover-img .volcano .vmiss { color: #bbb; font-style: italic; font-size: 10px; }
+  #hover-img .volcano img { max-width: 100%; height: auto;
+                            border: 1px solid #eee; border-radius: 4px; }
+  /* Plate filter — tick boxes choosing which plates' compounds + volcanoes show. */
+  #filter-panel { position: fixed; top: 12px; left: 12px; z-index: 9998;
+                  background: white; border: 1px solid #bbb; border-radius: 6px;
+                  padding: 6px 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+                  font: 11px sans-serif; color: #333; max-height: 80vh;
+                  overflow-y: auto; display: none; user-select: none; }
+  #filter-panel .fp-group + .fp-group { margin-top: 8px; }
+  #filter-panel .pf-head { font-weight: 700; padding-bottom: 4px;
+                           border-bottom: 1px solid #eee; margin-bottom: 4px; }
+  #filter-panel .pf-head span { color: #1D3557; cursor: pointer; font-weight: 400;
+                                font-size: 10px; }
+  #filter-panel .pf-head span:hover { text-decoration: underline; }
+  #filter-panel label { display: block; padding: 1px 0; cursor: pointer; white-space: nowrap; }
+  #filter-panel input { margin-right: 5px; vertical-align: middle; }
+  #hover-patents {
+    position: fixed; top: 12px; right: 660px; z-index: 9999;
+    background: white; border: 1px solid #bbb; border-radius: 6px;
+    padding: 6px 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    font: 11px sans-serif; color: #333; max-width: 320px;
+    max-height: 92vh; overflow-y: auto; user-select: text; display: none;
+  }
+  #hover-patents.pinned { border-color: #1D3557; border-width: 2px; padding: 5px 7px;
+                          box-shadow: 0 4px 14px rgba(0,0,0,0.25); }
+  #hover-patents .pat-header { display: flex; align-items: baseline; gap: 6px;
+                                font-weight: 700; padding-bottom: 4px;
+                                border-bottom: 1px solid #eee; margin-bottom: 4px; }
+  #hover-patents .pat-gene   { font-size: 12px; }
+  #hover-patents .pat-depmap { font-size: 10px; color: #1D3557; text-decoration: none; }
+  #hover-patents .pat-depmap:hover { text-decoration: underline; }
+  #hover-patents .pat-table  { border-collapse: collapse; width: 100%; font-size: 11px; }
+  #hover-patents .pat-table td { padding: 2px 4px; vertical-align: top; }
+  #hover-patents .pat-table tr:nth-child(even) td { background: #f8f8f8; }
+  #hover-patents .pat-empty  { color: #999; font-style: italic; padding: 4px 0; }
+  #axis-legend {
+    position: fixed; bottom: 12px; left: 12px; z-index: 9998;
+    background: white; border: 1px solid #bbb; padding: 6px 8px;
+    border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    font: 11px sans-serif; color: #333; max-width: 360px; user-select: text;
+  }
+  #axis-legend .title { font-weight: 700; padding-bottom: 3px; }
+  #axis-legend .ax { display: block; padding: 1px 0; }
+  #axis-legend .ax b  { display: inline-block; min-width: 1.2em; color: #555; }
+  #axis-legend .ax .lab { font-weight: 600; }
+  /* Range sliders — gate which genes are coloured (in-range) vs greyed. */
+  #range-panel { position: fixed; bottom: 12px; right: 12px; z-index: 9998;
+                 background: white; border: 1px solid #bbb; border-radius: 6px;
+                 padding: 8px 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+                 font: 11px sans-serif; color: #333; width: 250px;
+                 display: none; user-select: none; }
+  #range-panel .rp-title { font-weight: 700; padding-bottom: 4px;
+                           border-bottom: 1px solid #eee; margin-bottom: 6px; }
+  #range-panel .rp-count { color: #1D3557; font-weight: 400; font-size: 10px; }
+  #range-panel .rp-row { margin-bottom: 12px; }
+  #range-panel .rp-name { font-weight: 600; }
+  #range-panel .rp-val  { color: #555; font-family: ui-monospace, monospace; float: right; }
+  /* one dual-handle slider per axis: two range inputs overlaid on one track */
+  #range-panel .rp-dual { position: relative; height: 20px; margin-top: 7px; }
+  #range-panel .rp-dual .rp-track { position: absolute; top: 8px; left: 0; right: 0;
+                                    height: 4px; background: #d8dee6; border-radius: 2px; }
+  #range-panel .rp-dual input[type=range] { position: absolute; top: 0; left: 0;
+      width: 100%; height: 20px; margin: 0; background: none; pointer-events: none;
+      -webkit-appearance: none; appearance: none; }
+  #range-panel .rp-dual input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none; pointer-events: all;
+      height: 16px; width: 16px; border-radius: 50%; background: #1D3557;
+      border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.3); cursor: pointer; }
+  #range-panel .rp-dual input[type=range]::-moz-range-thumb { pointer-events: all;
+      height: 16px; width: 16px; border-radius: 50%; background: #1D3557;
+      border: 2px solid #fff; cursor: pointer; }
+  #range-panel .rp-dual input[type=range]::-webkit-slider-runnable-track { background: none; }
+  #range-panel .rp-dual input[type=range]::-moz-range-track { background: none; }
+  #range-panel .rp-reset { color: #1D3557; cursor: pointer; font-size: 10px;
+                           font-weight: 400; }
+  #range-panel .rp-reset:hover { text-decoration: underline; }
+</style>
+<div id="filter-panel">
+  <div class="fp-group" id="plate-group">
+    <div class="pf-head">Plates <span id="pf-all">all</span> / <span id="pf-none">none</span></div>
+    <div id="pf-boxes"></div>
+  </div>
+  <div class="fp-group" id="activity-group">
+    <div class="pf-head">Activity <span id="af-all">all</span> / <span id="af-none">none</span></div>
+    <div id="af-boxes"></div>
+  </div>
+</div>
+<div id="hover-img">
+  <div class="header">
+    <span class="gene" id="ifx-gene"></span>
+    <span class="meta" id="ifx-meta"></span>
+    <span class="hint">hover → click dot to pin → ◀ ▶ to page → hover a compound to peek, click it to pin its volcano(s) · tick plates at left</span>
+    <span class="close" id="ifx-close" title="Close (Esc)">×</span>
+  </div>
+  <div class="pager" id="ifx-pager">
+    <span class="pg-btn" id="ifx-prev" title="previous (←)">◀</span>
+    <span class="pg-ind" id="ifx-ind"></span>
+    <span class="pg-btn" id="ifx-next" title="next (→)">▶</span>
+  </div>
+  <div class="row" id="ifx-row"></div>
+  <div class="volcano" id="ifx-volcano"></div>
+</div>
+<div id="hover-patents"></div>
+<div id="axis-legend"></div>
+<div id="range-panel">
+  <div class="rp-title">Ranges <span class="rp-reset" id="rp-reset">reset</span>
+    <span class="rp-count" id="rp-count"></span></div>
+  <div class="rp-row" data-axis="x">
+    <span class="rp-name" id="x-name"></span><span class="rp-val" id="x-val"></span>
+    <div class="rp-dual"><div class="rp-track"></div>
+      <input type="range" id="x-lo"><input type="range" id="x-hi"></div>
+  </div>
+  <div class="rp-row" data-axis="y">
+    <span class="rp-name" id="y-name"></span><span class="rp-val" id="y-val"></span>
+    <div class="rp-dual"><div class="rp-track"></div>
+      <input type="range" id="y-lo"><input type="range" id="y-hi"></div>
+  </div>
+  <div class="rp-row" data-axis="z">
+    <span class="rp-name" id="z-name"></span><span class="rp-val" id="z-val"></span>
+    <div class="rp-dual"><div class="rp-track"></div>
+      <input type="range" id="z-lo"><input type="range" id="z-hi"></div>
+  </div>
+</div>
+<script>
+  document.addEventListener("DOMContentLoaded", function() {
+    var box   = document.getElementById("hover-img");
+    var row   = document.getElementById("ifx-row");
+    var gn    = document.getElementById("ifx-gene");
+    var meta  = document.getElementById("ifx-meta");
+    var clo   = document.getElementById("ifx-close");
+    var pager = document.getElementById("ifx-pager");
+    var prevB = document.getElementById("ifx-prev");
+    var nextB = document.getElementById("ifx-next");
+    var indEl = document.getElementById("ifx-ind");
+    var volBox = document.getElementById("ifx-volcano");
+    var patBox = document.getElementById("hover-patents");
+    var legEl  = document.getElementById("axis-legend");
+    var pf     = document.getElementById("filter-panel");
+    var pfBoxes = document.getElementById("pf-boxes");
+    var afBoxes = document.getElementById("af-boxes");
+    var patents = window.__GENE_PATENTS__ || {};
+    var depmapTpl = window.__DEPMAP_URL__ || "https://depmap.org/portal/gene/{gene}";
+    var pageSize = window.__PAGE_SIZE__ || 5;
+    var axis = window.__AXIS_LABELS__ || {x: "X", y: "Y", z: "Z"};
+    var plates = window.__PLATES__ || [];
+    var ticked = {};
+    plates.forEach(function(p) { ticked[p] = true; });
+    var activities = window.__ACTIVITIES__ || [];
+    var tickedAct = {};
+    activities.forEach(function(a) { tickedAct[a] = true; });
+    var gd = document.querySelector(".plotly-graph-div") || document.querySelector(".js-plotly-plot");
+    if (!gd) return;
+
+    function axLine(k, lab) {
+      return '<span class="ax"><b>' + k + '</b> <span class="lab">' + (lab || '') + '</span></span>';
+    }
+    legEl.innerHTML = '<div class="title">ⓘ Axis legend</div>'
+      + axLine('X', axis.x) + axLine('Y', axis.y) + axLine('Z', axis.z);
+
+    var pinned = false;
+    var currentGene = "";
+    var fullArr = [];
+    var entries = [];      // [{t: row, idx: absolute index in fullArr}] minus __META__
+    var page = 0;
+    var volPinIdx = null;  // data-eidx of the compound whose volcano(s) are click-pinned
+    var recolor3d = function() {};  // set by the slider block; re-applies gene colouring
+
+    // A gene is "active" under the current Plate + Activity ticks if it has at
+    // least one compound whose plate AND activity are both ticked. Used to grey
+    // out genes that have no compound on the selected plates/activities.
+    function geneHasVisibleCompound(gene) {
+      var arr = (window.__GENE_COMPOUNDS__ || {})[gene];
+      if (!arr) return false;
+      for (var i = 0; i < arr.length; i++) {
+        var t = arr[i];
+        if (!t || t[0] === "__META__") continue;
+        if (Array.isArray(t[3])) {
+          for (var j = 0; j < t[3].length; j++) {
+            var pl = t[3][j];
+            var plateOk = (!plates.length) || ticked[pl[0]];
+            var actOk = (!activities.length) || pl[3] === undefined || tickedAct[pl[3]];
+            if (plateOk && actOk) return true;
+          }
+        } else {
+          return true;   // single-volcano (non-plate) entry — always counts
+        }
+      }
+      return false;
+    }
+
+    // --- plate-aware helpers ---
+    // A compound entry's volcano slot (t[3]) is either:
+    //   * an Array of [plate, logfc, volcano_b64, activity]  (plate-aware FBX mode), or
+    //   * a base64 string                                    (single-volcano legacy mode).
+    // A plate-row is visible only if BOTH its plate and its activity are ticked.
+    function isPaged(t) { return Array.isArray(t[3]); }
+    function visPlates(t) {
+      return t[3].filter(function(pl) {
+        return ticked[pl[0]] && (!activities.length || pl[3] === undefined || tickedAct[pl[3]]);
+      });
+    }
+    function entryVisible(t) {
+      if (isPaged(t)) return visPlates(t).length > 0;
+      return true;
+    }
+    function bestLogfc(pls) {
+      var b = null;
+      pls.forEach(function(pl) {
+        var v = parseFloat(pl[1]);
+        if (!isNaN(v) && (b === null || v < b)) b = v;
+      });
+      return b === null ? '' : b.toFixed(2);
+    }
+
+    function positionPatBox() {
+      if (!patBox || !box) return;
+      var gap = 8;
+      var prevDisp = box.style.display;
+      if (prevDisp === "none" || !prevDisp) box.style.display = "block";
+      var boxRect = box.getBoundingClientRect();
+      box.style.display = prevDisp;
+      var rightPx = Math.max(8, window.innerWidth - boxRect.left + gap);
+      patBox.style.left = "auto";
+      patBox.style.right = rightPx + "px";
+    }
+    function renderPatents(gene) {
+      if (!patBox) return;
+      var html = patents[gene];
+      if (!html) {
+        var depmap = depmapTpl.replace("{gene}", encodeURIComponent(gene));
+        html = '<div class="pat-header"><span class="pat-gene">' + gene + '</span>'
+             + ' <a class="pat-depmap" href="' + depmap + '" target="_blank" '
+             + 'rel="noopener" title="open in DepMap">DepMap ↗</a></div>'
+             + '<div class="pat-empty">no patent entries for this gene</div>';
+      }
+      patBox.innerHTML = html;
+      patBox.style.display = "block";
+      positionPatBox();
+    }
+    window.addEventListener("resize", positionPatBox);
+
+    function renderPage() {
+      // Filter to compounds visible under the currently-ticked plates (Option B:
+      // the list itself shrinks/grows with the plate selection).
+      var vis = entries.filter(function(e) { return entryVisible(e.t); });
+      var total = vis.length;
+      var pages = Math.max(1, Math.ceil(total / pageSize));
+      if (page < 0) page = 0;
+      if (page > pages - 1) page = pages - 1;
+      var slice = vis.slice(page * pageSize, page * pageSize + pageSize);
+      var html = "";
+      for (var i = 0; i < slice.length; i++) {
+        var t = slice[i].t, eidx = slice[i].idx;
+        var img = t[1]
+          ? '<img src="data:image/png;base64,' + t[1] + '" draggable="false"/>'
+          : '<div class="noimg">(no structure)</div>';
+        var lf, note;
+        if (isPaged(t)) {
+          var vps = visPlates(t);
+          lf = bestLogfc(vps);
+          note = vps.length > 1
+            ? (vps.length + ' plates')
+            : (vps.length === 1 ? vps[0][0] : '');
+        } else {
+          lf = t[2];
+          note = t[5] || '';
+        }
+        html += '<div class="cell" data-eidx="' + eidx + '" data-cmp="' + (t[0] || '') + '">'
+              + img
+              + '<div class="cap"><b>' + (t[0] || '') + '</b>'
+              + (t[4] ? ' ' + t[4] : '')
+              + (lf ? '<br>logfc ' + lf : '')
+              + (note ? '<br><span class="pl">' + note + '</span>' : '')
+              + '</div></div>';
+      }
+      row.innerHTML = total ? html
+        : '<div class="empty">no compounds on the selected plate(s)</div>';
+      if (pages > 1) {
+        pager.style.display = "flex";
+        indEl.textContent = "page " + (page + 1) + "/" + pages + " · " + total + " compounds";
+        prevB.classList.toggle("disabled", page === 0);
+        nextB.classList.toggle("disabled", page === pages - 1);
+      } else {
+        pager.style.display = "none";
+      }
+      volPinIdx = null;          // re-render (page/plate change) clears the volcano pin
+      volBox.style.display = "none";
+      volBox.innerHTML = "";
+      positionPatBox();
+    }
+
+    var GENE_COMPOUNDS = window.__GENE_COMPOUNDS__ || {};
+    function render(p) {
+      if (!p) return false;
+      // customdata is now the gene name (string); the entries live in the map.
+      var gene = (typeof p.customdata === "string" && p.customdata)
+                 ? p.customdata
+                 : ((p.data && p.data.text && p.data.text[p.pointNumber]) || "");
+      if (!gene) return false;
+      var arr = GENE_COMPOUNDS[gene];
+      if (!arr || !arr.length) return false;
+      var metaTxt = "";
+      var ents = [];
+      for (var i = 0; i < arr.length; i++) {
+        var t = arr[i];
+        if (!t) continue;
+        if (t[0] === "__META__") { metaTxt = t[2] || ""; continue; }
+        ents.push({t: t, idx: i});
+      }
+      if (!ents.length) return false;
+      currentGene = gene;
+      fullArr = arr;
+      entries = ents;
+      page = 0;
+      gn.textContent = gene;
+      meta.textContent = metaTxt;
+      renderPage();
+      renderPatents(gene);
+      return true;
+    }
+    function unpin() {
+      pinned = false;
+      volPinIdx = null;
+      box.classList.remove("pinned");
+      box.style.display = "none";
+      volBox.style.display = "none";
+      if (patBox) { patBox.classList.remove("pinned"); patBox.style.display = "none"; }
+    }
+    function goPage(delta) {
+      var vis = entries.filter(function(e) { return entryVisible(e.t); });
+      var pages = Math.max(1, Math.ceil(vis.length / pageSize));
+      var np = page + delta;
+      if (np < 0 || np > pages - 1) return;
+      page = np;
+      renderPage();
+    }
+    prevB.addEventListener("click", function(e) { e.stopPropagation(); goPage(-1); });
+    nextB.addEventListener("click", function(e) { e.stopPropagation(); goPage(1); });
+
+    // Build the volcano HTML for a compound cell: one labelled volcano per ticked
+    // plate where it passed (plate-aware), or a single volcano (legacy). "" if none.
+    // Volcano <img> source: a relative PNG path (cached-folder mode) or an inline
+    // base64 blob (embedded mode), per window.__VOLCANO_MODE__. loading="lazy" so
+    // the browser only fetches each PNG when its panel is actually shown.
+    var VMODE = window.__VOLCANO_MODE__ || "b64";
+    function vimg(v) {
+      var src = (VMODE === "path") ? v : ("data:image/png;base64," + v);
+      return '<img loading="lazy" src="' + src + '"/>';
+    }
+    function buildVolcanoHtml(cell) {
+      var idx = parseInt(cell.getAttribute("data-eidx"), 10);
+      var t = fullArr[idx];
+      if (!t) return "";
+      var cmp = cell.getAttribute("data-cmp") || "";
+      var html = "";
+      if (isPaged(t)) {
+        var vps = visPlates(t);
+        if (!vps.length) return "";
+        vps.forEach(function(pl) {
+          var act = pl[3] ? ' · ' + pl[3] : '';
+          var ng = pl[4] ? ' (' + pl[4] + ' genes)' : '';
+          html += '<div class="vlabel">' + currentGene + ' · ' + cmp + ' · '
+                + pl[0] + act + ' (logfc ' + pl[1] + ')' + ng + '</div>';
+          html += pl[2] ? vimg(pl[2]) : '<div class="vmiss">(no volcano)</div>';
+        });
+      } else {
+        if (!t[3]) return "";
+        html = '<div class="vlabel">' + currentGene + ' · ' + cmp + '</div>' + vimg(t[3]);
+      }
+      return html;
+    }
+    function showVolcano(cell) {
+      var html = buildVolcanoHtml(cell);
+      if (!html) { volBox.style.display = "none"; return; }
+      volBox.innerHTML = html;
+      volBox.style.display = "block";
+    }
+    function markVolPin(cell) {
+      var prev = row.querySelector(".cell.vpin");
+      if (prev) prev.classList.remove("vpin");
+      if (cell) cell.classList.add("vpin");
+    }
+    // Hover = peek (only while no volcano is click-pinned). Click = pin/toggle so
+    // you can scroll the stacked volcanoes without them vanishing.
+    row.addEventListener("mouseover", function(e) {
+      if (!pinned || volPinIdx !== null) return;
+      var cell = e.target.closest(".cell");
+      if (cell) showVolcano(cell);
+    });
+    row.addEventListener("mouseout", function(e) {
+      if (!pinned || volPinIdx !== null) return;
+      if (e.relatedTarget && row.contains(e.relatedTarget)) return;
+      volBox.style.display = "none";
+    });
+    row.addEventListener("click", function(e) {
+      if (!pinned) return;
+      var cell = e.target.closest(".cell");
+      if (!cell) return;
+      e.stopPropagation();
+      var idx = parseInt(cell.getAttribute("data-eidx"), 10);
+      if (volPinIdx === idx) {        // click the same compound -> unpin
+        volPinIdx = null;
+        markVolPin(null);
+        volBox.style.display = "none";
+      } else {                        // pin this compound's volcano(s)
+        volPinIdx = idx;
+        markVolPin(cell);
+        showVolcano(cell);
+      }
+    });
+    gd.on("plotly_hover", function(e) {
+      if (pinned) return;
+      if (render(e.points && e.points[0])) box.style.display = "block";
+      else box.style.display = "none";
+    });
+    gd.on("plotly_unhover", function() {
+      if (pinned) return;
+      box.style.display = "none";
+      if (patBox) patBox.style.display = "none";
+    });
+    gd.on("plotly_click", function(e) {
+      if (render(e.points && e.points[0])) {
+        pinned = true;
+        box.classList.add("pinned");
+        box.style.display = "block";
+        if (patBox) patBox.classList.add("pinned");
+      }
+    });
+    clo.addEventListener("click", unpin);
+    document.addEventListener("keydown", function(e) {
+      if (!pinned) return;
+      if (e.key === "Escape") unpin();
+      else if (e.key === "ArrowLeft")  goPage(-1);
+      else if (e.key === "ArrowRight") goPage(1);
+    });
+
+    // --- checkbox panels (plates + activity) ---
+    // One generic group; both filter the same way (Option B): a plate-row is
+    // shown only if its plate AND its activity are ticked, and a compound is
+    // listed only if it has a visible plate-row.
+    function buildGroup(items, tickedMap, boxesEl, allId, noneId) {
+      if (!items.length) {
+        if (boxesEl.parentNode) boxesEl.parentNode.style.display = "none";
+        return false;
+      }
+      var html = "";
+      items.forEach(function(v) {
+        html += '<label><input type="checkbox" value="' + v + '" checked>' + v + '</label>';
+      });
+      boxesEl.innerHTML = html;
+      boxesEl.addEventListener("change", function(e) {
+        if (!e.target || e.target.type !== "checkbox") return;
+        tickedMap[e.target.value] = e.target.checked;
+        page = 0;
+        recolor3d();              // re-colour genes (a gene greys out if it has no
+        if (pinned) renderPage(); // compound on the ticked plates/activities)
+      });
+      function setAll(v) {
+        items.forEach(function(it) { tickedMap[it] = v; });
+        var cbs = boxesEl.querySelectorAll("input");
+        for (var i = 0; i < cbs.length; i++) cbs[i].checked = v;
+        page = 0;
+        recolor3d();
+        if (pinned) renderPage();
+      }
+      document.getElementById(allId).addEventListener("click", function() { setAll(true); });
+      document.getElementById(noneId).addEventListener("click", function() { setAll(false); });
+      return true;
+    }
+    var hasPlateG = buildGroup(plates, ticked, pfBoxes, "pf-all", "pf-none");
+    var hasActG   = buildGroup(activities, tickedAct, afBoxes, "af-all", "af-none");
+    if (hasPlateG || hasActG) pf.style.display = "block";
+
+    // --- range sliders (R² / association / MS score) ---
+    // Each axis has a dual handle (lo/hi). On change we slice every colour trace
+    // (indices R.areaTraces) to the in-range subset, leaving the grey backdrop
+    // (trace 0) full. Out-of-range genes therefore appear only as grey dots with
+    // no customdata → no compound panel on hover. Labels auto-hide past labelMax.
+    var R = window.__RANGES__;
+    if (R && typeof Plotly !== "undefined") {
+      var rp = document.getElementById("range-panel");
+      rp.style.display = "block";          // always visible once sliders are configured
+      var AX = ["x", "y", "z"];
+      var els = {}, orig = {};
+      function fmt(v) { return (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2)); }
+      // Full per-area arrays come from the injected __AREA_DATA__ (plain numbers).
+      // We must NOT read gd.data[ti].x — Plotly stores trace coords as base64
+      // {dtype, bdata} objects, not JS arrays (.slice/.length would fail).
+      var AREA = window.__AREA_DATA__ || [];
+      function captureOrig() {
+        orig = {};
+        R.areaTraces.forEach(function(ti, i) {
+          var d = AREA[i] || {x: [], y: [], z: [], gene: []};
+          orig[ti] = {x: d.x, y: d.y, z: d.z, text: d.gene, cd: d.gene};
+        });
+      }
+      function applyRanges() {
+        var b = {};
+        AX.forEach(function(a) {
+          var loV = parseFloat(els[a].lo.value), hiV = parseFloat(els[a].hi.value);
+          if (loV > hiV) { var t = loV; loV = hiV; hiV = t; }
+          els[a].val.textContent = fmt(loV) + " – " + fmt(hiV);
+          // A range <input> snaps to `step`, so a handle at the very end can land
+          // just shy of the data extreme and drop a boundary gene. Treat a handle
+          // within one step of its limit as unbounded (filter below is >= / <=).
+          var st = R[a].step || 0;
+          b[a] = [(loV <= R[a].min + st) ? -Infinity : loV,
+                  (hiV >= R[a].max - st) ?  Infinity : hiV];
+        });
+        var total = 0, masks = {};
+        R.areaTraces.forEach(function(ti) {
+          var o = orig[ti]; if (!o) return;
+          var m = [];
+          for (var k = 0; k < o.x.length; k++) {
+            // in slider range AND has a compound on a ticked plate+activity
+            var inr = o.x[k] >= b.x[0] && o.x[k] <= b.x[1]
+                   && o.y[k] >= b.y[0] && o.y[k] <= b.y[1]
+                   && o.z[k] >= b.z[0] && o.z[k] <= b.z[1]
+                   && geneHasVisibleCompound(o.text[k]);
+            m.push(inr); if (inr) total++;
+          }
+          masks[ti] = m;
+        });
+        // Mutate the trace data directly, then force a full redraw. Plotly.restyle
+        // of x/y/z on a gl3d (WebGL) scatter3d updates the data but does NOT
+        // reliably repaint the 3D scene — Plotly.redraw() does. In-range genes
+        // always keep their gene-name label.
+        R.areaTraces.forEach(function(ti) {
+          var o = orig[ti], m = masks[ti]; if (!o || !m || !gd.data[ti]) return;
+          var fx = [], fy = [], fz = [], ft = [], fcd = [];
+          for (var k = 0; k < m.length; k++) if (m[k]) {
+            fx.push(o.x[k]); fy.push(o.y[k]); fz.push(o.z[k]);
+            ft.push(o.text[k]); fcd.push(o.cd[k]);
+          }
+          var tr = gd.data[ti];
+          tr.x = fx; tr.y = fy; tr.z = fz; tr.text = ft; tr.customdata = fcd;
+        });
+        Plotly.redraw(gd);
+        document.getElementById("rp-count").textContent = total + " in range";
+      }
+      recolor3d = applyRanges;   // let the Plate/Activity checkboxes re-colour too
+      AX.forEach(function(a) {
+        var cfg = R[a];
+        var lo = document.getElementById(a + "-lo");
+        var hi = document.getElementById(a + "-hi");
+        [lo, hi].forEach(function(s) { s.min = cfg.min; s.max = cfg.max; s.step = cfg.step; });
+        lo.value = (cfg.lo !== undefined ? cfg.lo : cfg.min);   // default = focused corner box
+        hi.value = (cfg.hi !== undefined ? cfg.hi : cfg.max);
+        document.getElementById(a + "-name").textContent = cfg.label;
+        els[a] = {lo: lo, hi: hi, val: document.getElementById(a + "-val")};
+        lo.addEventListener("input", applyRanges);
+        hi.addEventListener("input", applyRanges);
+      });
+      document.getElementById("rp-reset").addEventListener("click", function() {
+        AX.forEach(function(a) {
+          els[a].lo.value = (R[a].lo !== undefined ? R[a].lo : R[a].min);
+          els[a].hi.value = (R[a].hi !== undefined ? R[a].hi : R[a].max);
+        });
+        applyRanges();
+      });
+      // gd.data may not be populated at DOMContentLoaded — poll briefly, then init.
+      var _need = R.areaTraces.length ? R.areaTraces[R.areaTraces.length - 1] : 0;
+      (function tryInit(n) {
+        if (gd.data && gd.data.length > _need) { captureOrig(); applyRanges(); }
+        else if (n > 0) { setTimeout(function() { tryInit(n - 1); }, 100); }
+        else { captureOrig(); applyRanges(); }
+      })(50);
+    }
   });
 </script>
 '''
@@ -1083,6 +1878,666 @@ def plot_target_3d(
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Interactive 3D target browser (generalised axes)
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+def plot_3d_interface(
+    target_df,
+    *,
+    x_col='R2', y_col='association_score', z_col='ms_score',
+    x_label='SAR predictability (R²)',
+    y_label='OpenTargets association_score',
+    z_label='MS score',
+    z_log=False,
+    z_clip_upper=None,
+    gene_col='gene',
+    must_include=(),
+    exclude_genes=(),
+    top_n_highlight=50,
+    min_x_highlight=None,
+    min_y_auto=None,
+    top_n_hover=5,
+    compounds_df=None,
+    volcano_source=None,
+    volcano_key='uniquecontrast',
+    page_size=5,
+    png_dir='data/srb_png',
+    df_raw=None,
+    volcano_size_px=350,
+    volcano_xlim=(-5.0, 5.0),
+    volcano_n_jobs=1,
+    compound_meta_df=None,
+    compound_meta_icons=None,
+    gene_patents_df=None,
+    gene_patents_top_n=5,
+    depmap_url_template='https://depmap.org/portal/gene/{gene}',
+    disease_area_colors=None,
+    na_area_color='#bbbbbb',
+    title='SAR predictability × disease association × MS score',
+    range_sliders=False,
+    range_defaults=None,
+    volcano_dir=None,
+    html_path=None,
+    height=900,
+    width=1500,
+    nb_display=True,
+):
+    """
+    Interactive 3D target browser — generalised sibling of ``plot_target_3d``.
+
+    Same interactive shell (hover a target → compound table top-right; click to
+    pin; hover a pinned compound → its volcano; per-gene patents panel) but the
+    three axes are now *configurable* via ``x_col`` / ``y_col`` / ``z_col`` so it
+    can plot any (R², association_score, ms_score)-style triple rather than the
+    hardwired (R², overall_score, fold). This is the function we extend with
+    new interface features; ``plot_target_3d`` is left untouched.
+
+    Highlights (coloured by ``disease_area``; everything else is a light-grey
+    backdrop):
+      * the top ``top_n_highlight`` genes closest to the (x↑, y↑, z↑) corner,
+      * all genes with ``y_col`` > ``min_y_auto`` (if set),
+      * everything in ``must_include`` (bypasses the filters).
+    If ``min_x_highlight`` is set, only genes at/above it are eligible for the
+    corner-distance and auto-y highlights (a noise-floor gate on the x-axis).
+
+    Graceful degradation: ``disease_area``, the ``top1..topN`` compound columns,
+    ``fisher_p`` and ``gene_patents_df`` are all optional. Missing compound
+    columns simply disable the hover/pin panel and volcanoes; the 3D scatter
+    with hover text always renders.
+
+    The compound panel accepts two input modes:
+      * **long-format** ``compounds_df`` (recommended) — one row per
+        (gene, compound) with columns ``gene``, ``compound`` (display id),
+        ``logfc``, ``smiles``; optionally a ``volcano_key`` column (default name
+        ``'uniquecontrast'``; falls back to ``compound`` if absent) that picks
+        which volcano to show, and ``sublabel`` (small caption line, e.g.
+        plate/conc). ALL of a gene's compounds are kept, sorted by ascending
+        ``logfc``, and the panel paginates ``page_size`` at a time (◀ / ▶).
+        Volcanoes are sliced from ``volcano_source`` by ``volcano_key``.
+      * **wide** ``top1..topN_{compound,logfc,smiles}`` columns on ``target_df``
+        (legacy ``plot_target_3d`` shape) — fixed top-N panel, volcanoes from
+        ``df_raw``.
+
+    :param df target_df: one row per gene. Must contain ``gene_col`` plus the
+        three axis columns; optionally ``disease_area`` (colour) and ``fisher_p``.
+    :param str x_col, y_col, z_col: column names mapped to the X/Y/Z axes.
+    :param str x_label, y_label, z_label: axis titles (also shown in the legend).
+    :param bool z_log: render Z on a log axis (and rank in log space).
+    :param float z_clip_upper: clip Z to this value for plotting (outliers stay
+        but are pulled to the cap); ``None`` = no clipping.
+    :param str gene_col: name of the gene-symbol column in ``target_df``.
+    :param df compounds_df: long-format compound table (see above). When given,
+        it supersedes the wide ``top*`` columns and enables pagination.
+    :param df volcano_source: rows the volcanoes are drawn from (needs the
+        ``volcano_key`` column plus ``genes``/``logfc``/``pvalue``). For the FBX
+        interface this is ``FBX_MEASURE`` keyed by ``uniquecontrast``.
+    :param str volcano_key: column in ``volcano_source`` / ``compounds_df`` that
+        identifies one volcano (default ``'uniquecontrast'``).
+    :param int page_size: compounds shown per page in the panel (default 5).
+    :return: ``(fig, highlighted)`` — the Plotly figure and highlighted-set DataFrame.
+    """
+    import io, base64
+    import plotly.graph_objects as go
+    from rdkit import Chem
+    from rdkit.Chem import Draw
+
+    if disease_area_colors is None:
+        disease_area_colors = {}
+
+    # 0) normalise the gene column to 'gene' so the rest mirrors plot_target_3d
+    df = target_df.copy()
+    if gene_col != 'gene':
+        assert gene_col in df.columns, f'gene_col {gene_col!r} not in target_df'
+        df = df.rename(columns={gene_col: 'gene'})
+
+    # 1) filter target_df → plot_df, with must_include bypassing the filters
+    required_cols = [x_col, y_col, z_col, 'gene']
+    missing = [c for c in required_cols if c not in df.columns]
+    assert not missing, f'target_df is missing {missing}'
+
+    plot_df = df.dropna(subset=[x_col, y_col, z_col]).copy()
+    n0 = len(plot_df)
+    must_set = set(must_include)
+    is_must = plot_df['gene'].isin(must_set)
+    dropped_named = plot_df[plot_df['gene'].isin(exclude_genes) & ~is_must]
+    keep = is_must | ~plot_df['gene'].isin(exclude_genes)
+    if z_clip_upper is not None:
+        keep = keep & (is_must | (plot_df[z_col] <= z_clip_upper))
+    dropped_z = plot_df[~keep & ~is_must & ~plot_df['gene'].isin(exclude_genes)]
+    plot_df = plot_df[keep]
+
+    # Z used for plotting (optionally clipped so an outlier doesn't squash the axis)
+    plot_df['_zplot'] = (plot_df[z_col].clip(upper=z_clip_upper)
+                         if z_clip_upper is not None else plot_df[z_col])
+
+    print(f'> {len(plot_df):,} / {n0:,} genes after filtering '
+          f'(x={x_col}, y={y_col}, z={z_col})')
+    if len(dropped_named):
+        print(f'  [excluded by name]  {list(dropped_named["gene"])}')
+    if z_clip_upper is not None and len(dropped_z):
+        print(f'  [excluded {z_col}>{z_clip_upper}]  {len(dropped_z)} genes')
+
+    # 2) corner-distance ranking on normalised (x, y, z) — z optionally in log space
+    plot_df['_zrank'] = (np.log10(plot_df[z_col].clip(lower=1e-9))
+                         if z_log else plot_df[z_col])
+
+    def _norm01(s):
+        rng = s.max() - s.min()
+        return (s - s.min()) / rng if rng else s * 0.0
+    xn = _norm01(plot_df[x_col])
+    yn = _norm01(plot_df[y_col])
+    zn = _norm01(plot_df['_zrank'])
+    plot_df['_dist'] = np.sqrt((1 - xn) ** 2 + (1 - yn) ** 2 + (1 - zn) ** 2)
+
+    candidates = (plot_df if min_x_highlight is None
+                  else plot_df[plot_df[x_col] >= min_x_highlight])
+    top_n   = candidates.nsmallest(top_n_highlight, '_dist')
+    auto_y  = (candidates[candidates[y_col] > min_y_auto]
+               if min_y_auto is not None else candidates.iloc[0:0])
+    must    = plot_df[plot_df['gene'].isin(must_set)]
+    miss = [g for g in must_include if g not in plot_df['gene'].values]
+    if miss:
+        print(f'  [warn] must_include not found: {miss}')
+    highlighted = pd.concat([top_n, auto_y, must]).drop_duplicates('gene')
+    print(f'  [highlight] corner-top-{top_n_highlight}={len(top_n)}, '
+          f'{y_col}>{min_y_auto}: {len(auto_y)}, must={len(must)}, '
+          f'union={len(highlighted)}'
+          + (f' (x floor = {min_x_highlight})' if min_x_highlight is not None else ''))
+
+    # Keep the corner-distance subset — it seeds the slider default ranges so the
+    # initial view matches the static highlight you'd otherwise get.
+    corner_df = highlighted
+
+    # Slider mode: highlighting is driven client-side by the 3 range sliders, so
+    # EVERY plotted gene needs a compound panel (any of them can become in-range).
+    # The colour/grey split is recomputed in the browser; here we just make sure
+    # panels exist for all of them.
+    if range_sliders:
+        highlighted = plot_df.copy()
+        print(f'  [range_sliders] panels built for all {len(highlighted)} plotted genes')
+
+    # 3) per-gene compound panel -> customdata. Two input modes:
+    #      * long-format `compounds_df` (variable length, paginated; volcanoes
+    #        from `volcano_source` keyed by `volcano_key`)
+    #      * wide `top1..topN_*` columns (fixed top-N; volcanoes from `df_raw`)
+    use_long = compounds_df is not None
+    have_compounds = use_long or all(f'top{k}_compound' in highlighted.columns
+                                     for k in range(1, top_n_hover + 1))
+    custom = {}
+    tasks = []     # (gene, volcano_key_value, entry_index, plate_index|None) for volcano pass
+    _vsrc = None   # frame the volcano pass slices by its 'compound' column
+    all_plates = []      # ordered unique plate labels for the client-side filter checkboxes
+    all_activities = []  # ordered activity levels (nr_down buckets) for the activity filter
+    if have_compounds:
+        _stats = {'png': 0, 'rdkit': 0, 'miss': 0}
+
+        def _compound_b64(compound, smi, size=(170, 110)):
+            if isinstance(compound, str) and compound and png_dir:
+                p = os.path.join(png_dir, f'{compound}.png')
+                if os.path.isfile(p):
+                    with open(p, 'rb') as fh:
+                        _stats['png'] += 1
+                        return base64.b64encode(fh.read()).decode()
+            if isinstance(smi, str) and smi:
+                m = Chem.MolFromSmiles(smi)
+                if m is not None:
+                    img = Draw.MolToImage(m, size=size)
+                    buf = io.BytesIO()
+                    img.save(buf, format='PNG')
+                    _stats['rdkit'] += 1
+                    return base64.b64encode(buf.getvalue()).decode()
+            _stats['miss'] += 1
+            return ''
+
+        # Pre-index compound metadata for O(1) lookup during the per-gene loop.
+        meta_index = None
+        if compound_meta_df is not None and compound_meta_icons:
+            cm0 = len(compound_meta_df)
+            cm = compound_meta_df.drop_duplicates('compound', keep='first')
+            if len(cm) < cm0:
+                print(f'  [warn] compound_meta_df: deduped {cm0 - len(cm):,} duplicate rows')
+            meta_index = cm.set_index('compound').to_dict('index')
+
+        def _meta_html(compound_id):
+            if not meta_index or not compound_id:
+                return ''
+            row = meta_index.get(compound_id, {}) or {}
+            parts = []
+            for col, cfg in compound_meta_icons.items():
+                v = row.get(col)
+                tooltip = cfg.get('tooltip', col)
+                state_map = cfg.get('state_map')
+                if state_map is not None:
+                    key = (str(v).strip().lower() if pd.notna(v) else None)
+                    state = (state_map.get(key) or state_map.get(v)
+                             or state_map.get('__default__', {'icon': '❓', 'color': '#bbb'}))
+                    parts.append(
+                        f'<span title="{tooltip}: {v}" '
+                        f'style="color:{state.get("color", "#bbb")};font-weight:600;'
+                        f'margin-left:3px;">{state.get("icon", "❓")}</span>')
+                    continue
+                show_if = cfg.get('show_if', lambda x: pd.notna(x) and bool(x))
+                try:
+                    ok = show_if(v)
+                except Exception:
+                    ok = False
+                if not ok:
+                    continue
+                icon  = cfg.get('icon', '•')
+                color = cfg.get('color', '#666')
+                label = (cfg.get('label', lambda _v: '')(v)
+                         if callable(cfg.get('label')) else cfg.get('label', ''))
+                parts.append(
+                    f'<span title="{tooltip}: {v}" '
+                    f'style="color:{color};font-weight:600;margin-left:3px;">'
+                    f'{icon}{label}</span>')
+            return ''.join(parts)
+
+        def _fmt_fp(v):
+            if v is None or pd.isna(v):
+                return '—'
+            return '< 0.0001' if v < 0.0001 else f'{v:.4f}'
+
+        # Gene-level header meta. Only emit `fisher_p=…` when the column exists
+        # (it doesn't for the FBX interface), so the panel header stays clean.
+        _has_fp = 'fisher_p' in highlighted.columns
+        fp_by_gene = (highlighted.set_index('gene')['fisher_p'].to_dict()
+                      if _has_fp else {})
+
+        def _meta_str(gene):
+            return f'fisher_p={_fmt_fp(fp_by_gene.get(gene))}' if _has_fp else ''
+
+        if use_long:
+            need = {'gene', 'compound', 'logfc', 'smiles'}
+            miss_c = need - set(compounds_df.columns)
+            assert not miss_c, f'compounds_df missing {miss_c}'
+            vkey_col = volcano_key if volcano_key in compounds_df.columns else 'compound'
+            has_sub = 'sublabel' in compounds_df.columns
+            # plate-aware mode: a `plate` column means one row per (gene, compound,
+            # plate). We collapse to one entry per (gene, compound) carrying ALL its
+            # plates; the panel JS filters/stacks them per the plate checkboxes.
+            plate_aware = 'plate' in compounds_df.columns
+            if volcano_source is not None:
+                _vsrc = (volcano_source.rename(columns={volcano_key: 'compound'})
+                         if volcano_key != 'compound' else volcano_source)
+            cdf = compounds_df[compounds_df['gene'].isin(set(highlighted['gene']))].copy()
+            if plate_aware:
+                all_plates = sorted(compounds_df['plate'].dropna().astype(str).unique())
+                # Optional per-experiment activity level (nr_down bucket). Ordered
+                # high→silent for the checkbox panel; only levels present are kept.
+                has_act = 'activity' in compounds_df.columns
+                has_ng = 'n_genes' in compounds_df.columns   # genes measured in the experiment
+                if has_act:
+                    _ACT_ORDER = ['High (>25)', 'Medium (11-25)', 'Low (2-10)',
+                                  'Single (1)', 'Silent']
+                    _present = set(compounds_df['activity'].dropna().astype(str))
+                    all_activities = ([a for a in _ACT_ORDER if a in _present]
+                                      + sorted(_present - set(_ACT_ORDER)))
+                # compounds ordered by their strongest (min) logfc; plates within a
+                # compound ordered by logfc too.
+                cdf['_best'] = cdf.groupby(['gene', 'compound'])['logfc'].transform('min')
+                cdf = cdf.sort_values(['gene', '_best', 'compound', 'logfc'],
+                                      ascending=True)
+                for gene, gdf in cdf.groupby('gene', sort=False):
+                    entries = [['__META__', '', _meta_str(gene), '', '', '']]
+                    for compound, cg in gdf.groupby('compound', sort=False):
+                        lab = str(compound)
+                        smi = (cg['smiles'].dropna().iloc[0]
+                               if cg['smiles'].notna().any() else None)
+                        ei = len(entries)
+                        plate_rows = []   # [plate, logfc, volcano, activity, n_genes] per plate
+                        for pi, (_, pr) in enumerate(cg.iterrows()):
+                            plate_rows.append([
+                                str(pr['plate']),
+                                f"{pr['logfc']:.2f}" if pd.notna(pr['logfc']) else '',
+                                '',   # volcano b64/path filled in the render pass below
+                                (str(pr['activity']) if has_act and pd.notna(pr['activity'])
+                                 else ''),
+                                (str(int(pr['n_genes'])) if has_ng and pd.notna(pr['n_genes'])
+                                 else ''),
+                            ])
+                            vk = pr[vkey_col]
+                            if pd.notna(vk):
+                                tasks.append((gene, vk, ei, pi))
+                        entries.append([
+                            lab,
+                            _compound_b64(lab or None, smi),
+                            f"{cg['logfc'].min():.2f}",
+                            plate_rows,
+                            _meta_html(lab),
+                            '',
+                        ])
+                    custom[gene] = entries
+            else:
+                # one entry per (gene, compound), single volcano, no plate filter
+                cdf = cdf.sort_values(['gene', 'logfc'], ascending=[True, True])
+                for gene, grp in cdf.groupby('gene', sort=False):
+                    entries = [['__META__', '', _meta_str(gene), '', '', '']]
+                    for _, r in grp.iterrows():
+                        lab = str(r['compound']) if pd.notna(r['compound']) else ''
+                        sub = (str(r['sublabel']) if has_sub and pd.notna(r.get('sublabel'))
+                               else '')
+                        entries.append([
+                            lab,
+                            _compound_b64(lab or None,
+                                          r['smiles'] if pd.notna(r['smiles']) else None),
+                            f"{r['logfc']:.2f}" if pd.notna(r['logfc']) else '',
+                            '',
+                            _meta_html(lab),
+                            sub,
+                        ])
+                        vk = r[vkey_col]
+                        if pd.notna(vk):
+                            tasks.append((gene, vk, len(entries) - 1, None))
+                    custom[gene] = entries
+            # Highlighted genes with no associated compound still need a (meta-only)
+            # customdata slot so the figure's `customdata=[custom[g] ...]` never KeyErrors.
+            for g in highlighted['gene']:
+                if g not in custom:
+                    custom[g] = [['__META__', '', _meta_str(g), '', '', '']]
+            print(f'> long-format panel: '
+                  f'{sum(len(v) - 1 for v in custom.values()):,} compound entries '
+                  f'across {sum(len(v) > 1 for v in custom.values())} genes '
+                  f'with compounds (page_size={page_size}'
+                  + (f', {len(all_plates)} plates' if plate_aware else '') + ')')
+        else:
+            _vsrc = df_raw
+            for _, row in highlighted.iterrows():
+                gene = row['gene']
+                entries = [['__META__', '', _meta_str(gene), '', '', '']]
+                for k in range(1, top_n_hover + 1):
+                    c = row.get(f'top{k}_compound')
+                    s = row.get(f'top{k}_smiles')
+                    l = row.get(f'top{k}_logfc')
+                    c_str = str(c) if pd.notna(c) else ''
+                    entries.append([
+                        c_str,
+                        _compound_b64(c if pd.notna(c) else None,
+                                      s if pd.notna(s) else None),
+                        f'{l:.2f}' if pd.notna(l) else '',
+                        '',
+                        _meta_html(c_str),
+                        '',
+                    ])
+                    if c_str:
+                        tasks.append((gene, c_str, len(entries) - 1, None))
+                custom[gene] = entries
+
+        n_thumbs = _stats['png'] + _stats['rdkit']
+        print(f'> built {n_thumbs:,} structure thumbnails across {len(custom)} genes '
+              f'(png={_stats["png"]}, rdkit={_stats["rdkit"]}, missing={_stats["miss"]})')
+
+        # Fill a rendered volcano into the right customdata slot. plate_idx is
+        # None for single-volcano entries (slot 3 is the b64 string) or an int
+        # for plate-aware entries (slot 3 is a list of [plate, logfc, b64]).
+        def _set_volcano(g, ei, plate_idx, b64):
+            if plate_idx is None:
+                custom[g][ei][3] = b64
+            else:
+                custom[g][ei][3][plate_idx][2] = b64
+
+        # 3b) per-(gene, compound[, plate]) volcanoes from `_vsrc`, keyed by the
+        #     volcano-key value carried in `tasks`. If `volcano_dir` is set (and
+        #     we're writing HTML), PNGs are cached to that folder and referenced by
+        #     relative path (lazy-loaded, tiny HTML, cached re-runs skip rendering);
+        #     otherwise they're embedded as base64 in the customdata.
+        if _vsrc is not None and tasks:
+            import hashlib
+            _external = bool(volcano_dir) and bool(html_path)
+            if _external:
+                os.makedirs(volcano_dir, exist_ok=True)
+                _rel = os.path.relpath(
+                    volcano_dir, os.path.dirname(os.path.abspath(html_path))).replace(os.sep, '/')
+
+                def _vfname(g, vk):
+                    key = f'{g}|{vk}|{volcano_xlim[0]}|{volcano_xlim[1]}|{volcano_size_px}'
+                    return hashlib.md5(key.encode()).hexdigest()[:16] + '.png'
+
+                # cache hits: PNG already on disk -> reference it, skip render
+                render = []
+                for (g, vk, ei, pi) in tasks:
+                    fn_ = _vfname(g, vk)
+                    if os.path.exists(os.path.join(volcano_dir, fn_)):
+                        _set_volcano(g, ei, pi, _rel + '/' + fn_)
+                    else:
+                        render.append((g, vk, ei, pi, fn_))
+                n_cached = len(tasks) - len(render)
+            else:
+                render = [(g, vk, ei, pi, None) for (g, vk, ei, pi) in tasks]
+                n_cached = 0
+
+            def _store(g, ei, pi, fn_, b64):
+                # external: write PNG + store its relative path ('' on failure);
+                # embedded: store the base64 string directly.
+                if _external:
+                    if b64:
+                        with open(os.path.join(volcano_dir, fn_), 'wb') as _fh:
+                            _fh.write(base64.b64decode(b64))
+                        _set_volcano(g, ei, pi, _rel + '/' + fn_)
+                    else:
+                        _set_volcano(g, ei, pi, '')
+                else:
+                    _set_volcano(g, ei, pi, b64)
+
+            n_render = len(render)
+            if n_render == 0:
+                pass
+            elif volcano_n_jobs == 1:
+                import matplotlib.pyplot as plt
+                pbar = tqdm(total=n_render, desc='volcanoes', unit='cmp', mininterval=0.5)
+                for g, vk, ei, pi, fn_ in render:
+                    fig_v, ax_v = plt.subplots(
+                        figsize=(volcano_size_px / 100, volcano_size_px / 100), dpi=100)
+                    try:
+                        plot_volcano(_vsrc, vk, g,
+                                     xmin=volcano_xlim[0], xmax=volcano_xlim[1],
+                                     ax=ax_v, title='')
+                        buf = io.BytesIO()
+                        fig_v.savefig(buf, format='PNG', bbox_inches='tight')
+                        b64 = base64.b64encode(buf.getvalue()).decode()
+                    except Exception as e:
+                        tqdm.write(f'  [warn] volcano failed {g}/{vk}: {e}')
+                        b64 = ''
+                    finally:
+                        plt.close(fig_v)
+                    _store(g, ei, pi, fn_, b64)
+                    pbar.update(1)
+                pbar.close()
+            else:
+                import contextlib
+                import joblib as _joblib
+                from joblib import Parallel, delayed
+                unique_keys = sorted({vk for _, vk, _, _, _ in render})
+                _cols = ['compound', 'genes', 'logfc', 'pvalue']
+                _filt = _vsrc.loc[_vsrc['compound'].isin(unique_keys), _cols].dropna()
+                sub_cache = {c: g for c, g in _filt.groupby('compound', sort=False)}
+                _empty = _filt.iloc[0:0]
+                print(f'> rendering {n_render:,} volcanoes on {volcano_n_jobs} workers'
+                      + (f' ({n_cached:,} cached)' if _external else '') + '...', flush=True)
+
+                @contextlib.contextmanager
+                def _tqdm_joblib(pbar):
+                    class _Cb(_joblib.parallel.BatchCompletionCallBack):
+                        def __call__(self, *a, **kw):
+                            pbar.update(n=self.batch_size)
+                            return super().__call__(*a, **kw)
+                    prev = _joblib.parallel.BatchCompletionCallBack
+                    _joblib.parallel.BatchCompletionCallBack = _Cb
+                    try:
+                        yield pbar
+                    finally:
+                        _joblib.parallel.BatchCompletionCallBack = prev
+                        pbar.close()
+
+                pbar = tqdm(total=n_render, desc='volcanoes', unit='cmp', mininterval=0.5)
+                with _tqdm_joblib(pbar):
+                    results = Parallel(n_jobs=volcano_n_jobs, backend='loky')(
+                        delayed(_volcano_render_worker)(
+                            (g, vk, sub_cache.get(vk, _empty), volcano_size_px,
+                             volcano_xlim[0], volcano_xlim[1]))
+                        for g, vk, _, _, _ in render)
+                for (g, vk, ei, pi, fn_), b64 in zip(render, results):
+                    _store(g, ei, pi, fn_, b64)
+            print(f'> volcanoes: {n_cached:,} cached, {n_render:,} rendered'
+                  + (f' -> {volcano_dir}' if _external else ' (embedded base64)'))
+        elif _vsrc is None:
+            print('> no volcano source (pass df_raw or volcano_source) — volcanoes disabled')
+    else:
+        print('> no compound panel (provide compounds_df or top1..topN columns) — '
+              'scatter + hover text only')
+
+    # 4) build figure
+    def _hover_text(d):
+        areas = (d['disease_area'].fillna('—') if 'disease_area' in d.columns
+                 else pd.Series(['—'] * len(d), index=d.index))
+        return [
+            f'<b>{g}</b><br>{x_label}={xx:.3f}<br>{y_label}={yy:.3f}<br>'
+            f'{z_label}={zz:.3f}<br>area={a}'
+            for g, xx, yy, zz, a in zip(
+                d['gene'], d[x_col], d[y_col], d[z_col], areas)
+        ]
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter3d(
+        x=plot_df[x_col], y=plot_df[y_col], z=plot_df['_zplot'],
+        mode='markers',
+        marker=dict(size=3, color='lightgrey', opacity=0.5, line=dict(width=0)),
+        name=f'all ({len(plot_df):,})',
+        text=_hover_text(plot_df), hoverinfo='text',
+    ))
+
+    NA_LABEL = '— no priority area —'
+    hl = highlighted.copy()
+    hl['_area'] = (hl['disease_area'].fillna(NA_LABEL)
+                   if 'disease_area' in hl.columns else NA_LABEL)
+    area_order = [a for a in disease_area_colors if a in hl['_area'].values]
+    if NA_LABEL in hl['_area'].values:
+        area_order.append(NA_LABEL)
+
+    area_data = []   # plain coord arrays per area trace, for the slider JS (Plotly
+                     # stores trace x/y/z as base64-encoded objects, not JS arrays)
+    for area in area_order:
+        grp = hl[hl['_area'] == area]
+        color = disease_area_colors.get(area, na_area_color)
+        trace_kw = dict(
+            x=grp[x_col], y=grp[y_col], z=grp['_zplot'],
+            mode='markers+text',
+            marker=dict(size=6, color=color, opacity=0.95,
+                        line=dict(color='#333', width=1)),
+            text=grp['gene'], textposition='top center',
+            textfont=dict(size=10, color='black'),
+            hovertext=_hover_text(grp), hoverinfo='text',
+            name=f'{area} ({len(grp)})',
+        )
+        if have_compounds:
+            # customdata = just the gene name (one simple string per point). The
+            # heavy per-gene compound entries live in the injected __GENE_COMPOUNDS__
+            # map instead — so restyles only move tiny string arrays.
+            trace_kw['customdata'] = list(grp['gene'])
+        fig.add_trace(go.Scatter3d(**trace_kw))
+        area_data.append({
+            'x': [float(v) for v in grp[x_col]],
+            'y': [float(v) for v in grp[y_col]],
+            'z': [float(v) for v in grp['_zplot']],
+            'gene': list(grp['gene']),
+        })
+
+    # Range-slider config. The colour traces are indices 1..N (trace 0 = grey
+    # backdrop); the JS slices them to the in-range subset on each slider move.
+    ranges_cfg = None
+    if range_sliders:
+        # Sliders span the full plotted range. Default handles = a box that keeps
+        # ~the corner-subset SIZE of genes "high on all three axes" (an axis-aligned
+        # box can't reproduce the distance-based corner set — its bounding box is
+        # far larger — so we binary-search a common lower percentile that yields
+        # roughly `target` genes in the x≥·∧y≥·∧z≥· intersection).
+        target = max(1, min(len(corner_df), len(plot_df)))
+        xv = plot_df[x_col].to_numpy(dtype=float)
+        yv = plot_df[y_col].to_numpy(dtype=float)
+        zv = plot_df['_zplot'].to_numpy(dtype=float)
+
+        def _count(p):
+            return int(((xv >= np.quantile(xv, p)) & (yv >= np.quantile(yv, p))
+                        & (zv >= np.quantile(zv, p))).sum())
+        _plo, _phi = 0.0, 0.99
+        for _ in range(40):
+            _pm = (_plo + _phi) / 2
+            if _count(_pm) > target:
+                _plo = _pm
+            else:
+                _phi = _pm
+        _p = _plo
+
+        def _axis_cfg(v, label):
+            lo, hi = float(v.min()), float(v.max())
+            return {'min': lo, 'max': hi, 'step': (hi - lo) / 200 if hi > lo else 1.0,
+                    'lo': float(np.quantile(v, _p)), 'hi': hi, 'label': label}
+        ranges_cfg = {
+            'x': _axis_cfg(xv, x_label),
+            'y': _axis_cfg(yv, y_label),
+            'z': _axis_cfg(zv, z_label),
+            'areaTraces': list(range(1, 1 + len(area_order))),
+            'labelMax': max(70, target + 10),
+        }
+        # Per-axis default lower-handle overrides, e.g. {'y': 0.35} to start the
+        # association handle at 0.35 (clamped to the axis range).
+        for _ax, _lo in (range_defaults or {}).items():
+            if _ax in ranges_cfg:
+                ranges_cfg[_ax]['lo'] = float(np.clip(_lo, ranges_cfg[_ax]['min'],
+                                                      ranges_cfg[_ax]['max']))
+        print(f'  [range_sliders] default box ≈ {_count(_p)} genes '
+              f'(target {target}); drag any handle to widen/narrow')
+
+    fig.update_layout(
+        height=height, width=width, title=title,
+        scene=dict(
+            xaxis=dict(title=x_label, showbackground=False,
+                       gridcolor='lightgrey', zeroline=False),
+            yaxis=dict(title=y_label, showbackground=False,
+                       gridcolor='lightgrey', zeroline=False),
+            zaxis=dict(title=z_label, type=('log' if z_log else 'linear'),
+                       showbackground=False, gridcolor='lightgrey', zeroline=False),
+            bgcolor='white',
+        ),
+        legend=dict(itemsizing='constant'),
+        margin=dict(l=0, r=0, b=0, t=40),
+    )
+
+    # 5) optional standalone HTML with on-hover structure thumbnails
+    if html_path:
+        os.makedirs(os.path.dirname(html_path), exist_ok=True)
+        fig.write_html(html_path, include_plotlyjs='cdn')
+        gene_patents_map = _build_gene_patents_html_map(
+            gene_patents_df, gene_patents_top_n, depmap_url_template)
+        import json as _json
+        inject_data = (
+            '<script>window.__GENE_COMPOUNDS__ = '
+            + _json.dumps(custom if have_compounds else {}) + ';\n'
+            'window.__GENE_PATENTS__ = '
+            + _json.dumps(gene_patents_map) + ';\n'
+            'window.__DEPMAP_URL__ = ' + _json.dumps(depmap_url_template) + ';\n'
+            'window.__PAGE_SIZE__ = ' + str(int(page_size)) + ';\n'
+            'window.__PLATES__ = ' + _json.dumps(list(all_plates)) + ';\n'
+            'window.__ACTIVITIES__ = ' + _json.dumps(list(all_activities)) + ';\n'
+            'window.__RANGES__ = ' + _json.dumps(ranges_cfg) + ';\n'
+            'window.__AREA_DATA__ = ' + _json.dumps(area_data) + ';\n'
+            'window.__VOLCANO_MODE__ = '
+            + _json.dumps('path' if (volcano_dir and html_path) else 'b64') + ';\n'
+            'window.__AXIS_LABELS__ = '
+            + _json.dumps({'x': x_label, 'y': y_label, 'z': z_label}) + ';</script>')
+        with open(html_path) as fh:
+            html = fh.read()
+        with open(html_path, 'w') as fh:
+            fh.write(html.replace('</body>', inject_data + _INTERFACE_INJECT + '</body>'))
+        print(f'wrote {html_path}  ({os.path.getsize(html_path) / 1e6:.1f} MB)')
+
+    if nb_display:
+        fig.show()
+
+    return fig, highlighted
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Per-compound volcano plot (one gene highlighted)
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1169,7 +2624,9 @@ def plot_volcano(df, compound, gene,
     ax.set_xlim(xmin, xmax)
     ax.set_xlabel('logfc')
     ax.set_ylabel('-log10(p-value)')
-    ax.set_title(title or f'{compound}  ({len(agg):,} genes)')
+    # title=None -> default caption; title='' -> no title (the interface labels
+    # the volcano in its HTML panel instead); any other string -> used verbatim.
+    ax.set_title(f'{compound}  ({len(agg):,} genes)' if title is None else title)
     ax.legend(loc='best', fontsize=8, frameon=False)
     plt.tight_layout()
     return agg
