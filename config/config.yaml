@@ -3,6 +3,7 @@
 # so both `config.RAW_PROTEOMICS_PATH` and bare `RAW_PROTEOMICS_PATH` work.
 # Conflicting keys were unified to the MS_TargetML (most recent) values.
 
+# colors
 ACTIVE_C: '#008bfb'
 SILENT_C: '#ff0051'
 
@@ -41,3 +42,6 @@ FEATURES_TYPE: prevalence
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
 CHEMLIB_OVERWRITE: false
+
+# disease association research:
+RESEARCH_161_T_20260604: /mnt/c/Users/gtamo/Desktop/GT/disease_association/20260604_degradation_research.json

@@ -877,6 +877,10 @@ _INTERFACE_INJECT = '''
   #hover-img .volcano .vmiss { color: #bbb; font-style: italic; font-size: 10px; }
   #hover-img .volcano img { max-width: 100%; height: auto;
                             border: 1px solid #eee; border-radius: 4px; }
+  /* interactive SVG volcano (hover a significant point -> gene-name tooltip) */
+  #hover-img .volcano .vobj { width: 360px; height: 360px; max-width: 100%;
+                              border: 1px solid #eee; border-radius: 4px; display: block;
+                              margin: 0 auto; }
   /* Plate filter — tick boxes choosing which plates' compounds + volcanoes show. */
   #filter-panel { position: fixed; top: 12px; left: 12px; z-index: 9998;
                   background: white; border: 1px solid #bbb; border-radius: 6px;
@@ -910,28 +914,54 @@ _INTERFACE_INJECT = '''
   #hover-patents .pat-table td { padding: 2px 4px; vertical-align: top; }
   #hover-patents .pat-table tr:nth-child(even) td { background: #f8f8f8; }
   #hover-patents .pat-empty  { color: #999; font-style: italic; padding: 4px 0; }
-  #axis-legend {
-    position: fixed; bottom: 12px; left: 12px; z-index: 9998;
+  #axis-legend {            /* bottom-left, immediately above the slider box */
+    position: fixed; bottom: 104px; left: 12px; z-index: 9998;
     background: white; border: 1px solid #bbb; padding: 6px 8px;
     border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);
     font: 11px sans-serif; color: #333; max-width: 360px; user-select: text;
   }
   #axis-legend .title { font-weight: 700; padding-bottom: 3px; }
-  #axis-legend .ax { display: block; padding: 1px 0; }
+  #axis-legend .ax { display: block; padding: 1px 0; cursor: help; }
+  #axis-legend .ax:hover { background: #f3f3f3; border-radius: 3px; }
   #axis-legend .ax b  { display: inline-block; min-width: 1.2em; color: #555; }
   #axis-legend .ax .lab { font-weight: 600; }
-  /* Range sliders — gate which genes are coloured (in-range) vs greyed. */
-  #range-panel { position: fixed; bottom: 12px; right: 12px; z-index: 9998;
+  /* Per-gene degradation-research box (bottom-right). */
+  #research-box { position: fixed; right: 12px; bottom: 12px; z-index: 9998;
+                  background: white; border: 1px solid #bbb; border-radius: 6px;
+                  padding: 8px 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+                  font: 11px sans-serif; color: #333; width: 360px; max-height: 52vh;
+                  overflow-y: auto; display: none; user-select: text; }
+  #research-box.pinned { border-color: #1D3557; border-width: 2px; }
+  #research-box .rb-head { display: flex; align-items: baseline; gap: 8px;
+                           padding-bottom: 4px; border-bottom: 1px solid #eee;
+                           margin-bottom: 6px; flex-wrap: wrap; }
+  #research-box .rb-gene { font-weight: 700; font-size: 13px; }
+  #research-box .rb-class { color: #666; font-size: 10px; }
+  #research-box .rb-conf { font-size: 9px; font-weight: 700; padding: 1px 6px;
+                           border-radius: 8px; color: #fff; }
+  #research-box .rb-sec { margin-bottom: 5px; line-height: 1.3; }
+  #research-box .rb-lab { font-weight: 600; color: #1D3557; }
+  #research-box .rb-src a { color: #1D3557; text-decoration: none; margin-right: 6px;
+                            font-size: 10px; }
+  #research-box .rb-src a:hover { text-decoration: underline; }
+  /* Range sliders — flattened: 3 axes side-by-side, bottom-left. */
+  #range-panel { position: fixed; bottom: 12px; left: 12px; z-index: 9998;
                  background: white; border: 1px solid #bbb; border-radius: 6px;
-                 padding: 8px 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);
-                 font: 11px sans-serif; color: #333; width: 250px;
+                 padding: 6px 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+                 font: 11px sans-serif; color: #333;
                  display: none; user-select: none; }
   #range-panel .rp-title { font-weight: 700; padding-bottom: 4px;
                            border-bottom: 1px solid #eee; margin-bottom: 6px; }
   #range-panel .rp-count { color: #1D3557; font-weight: 400; font-size: 10px; }
-  #range-panel .rp-row { margin-bottom: 12px; }
-  #range-panel .rp-name { font-weight: 600; }
-  #range-panel .rp-val  { color: #555; font-family: ui-monospace, monospace; float: right; }
+  #range-panel .rp-cols { display: flex; gap: 16px; align-items: flex-start; }
+  #range-panel .rp-row { margin: 0; width: 165px; }
+  /* fixed-height header (name + value each on its own line) so the three dual
+     sliders line up regardless of label length */
+  #range-panel .rp-name { display: block; font-weight: 600; line-height: 13px;
+                          min-height: 26px; }
+  #range-panel .rp-val  { display: block; float: none; color: #555;
+                          font-family: ui-monospace, monospace; font-size: 10px;
+                          margin: 1px 0 3px 0; }
   /* one dual-handle slider per axis: two range inputs overlaid on one track */
   #range-panel .rp-dual { position: relative; height: 20px; margin-top: 7px; }
   #range-panel .rp-dual .rp-track { position: absolute; top: 8px; left: 0; right: 0;
@@ -979,23 +1009,26 @@ _INTERFACE_INJECT = '''
 </div>
 <div id="hover-patents"></div>
 <div id="axis-legend"></div>
+<div id="research-box"></div>
 <div id="range-panel">
   <div class="rp-title">Ranges <span class="rp-reset" id="rp-reset">reset</span>
     <span class="rp-count" id="rp-count"></span></div>
-  <div class="rp-row" data-axis="x">
-    <span class="rp-name" id="x-name"></span><span class="rp-val" id="x-val"></span>
-    <div class="rp-dual"><div class="rp-track"></div>
-      <input type="range" id="x-lo"><input type="range" id="x-hi"></div>
-  </div>
-  <div class="rp-row" data-axis="y">
-    <span class="rp-name" id="y-name"></span><span class="rp-val" id="y-val"></span>
-    <div class="rp-dual"><div class="rp-track"></div>
-      <input type="range" id="y-lo"><input type="range" id="y-hi"></div>
-  </div>
-  <div class="rp-row" data-axis="z">
-    <span class="rp-name" id="z-name"></span><span class="rp-val" id="z-val"></span>
-    <div class="rp-dual"><div class="rp-track"></div>
-      <input type="range" id="z-lo"><input type="range" id="z-hi"></div>
+  <div class="rp-cols">
+    <div class="rp-row" data-axis="x">
+      <span class="rp-name" id="x-name"></span><span class="rp-val" id="x-val"></span>
+      <div class="rp-dual"><div class="rp-track"></div>
+        <input type="range" id="x-lo"><input type="range" id="x-hi"></div>
+    </div>
+    <div class="rp-row" data-axis="y">
+      <span class="rp-name" id="y-name"></span><span class="rp-val" id="y-val"></span>
+      <div class="rp-dual"><div class="rp-track"></div>
+        <input type="range" id="y-lo"><input type="range" id="y-hi"></div>
+    </div>
+    <div class="rp-row" data-axis="z">
+      <span class="rp-name" id="z-name"></span><span class="rp-val" id="z-val"></span>
+      <div class="rp-dual"><div class="rp-track"></div>
+        <input type="range" id="z-lo"><input type="range" id="z-hi"></div>
+    </div>
   </div>
 </div>
 <script>
@@ -1011,6 +1044,8 @@ _INTERFACE_INJECT = '''
     var indEl = document.getElementById("ifx-ind");
     var volBox = document.getElementById("ifx-volcano");
     var patBox = document.getElementById("hover-patents");
+    var researchBox = document.getElementById("research-box");
+    var research = window.__GENE_RESEARCH__ || {};
     var legEl  = document.getElementById("axis-legend");
     var pf     = document.getElementById("filter-panel");
     var pfBoxes = document.getElementById("pf-boxes");
@@ -1019,6 +1054,7 @@ _INTERFACE_INJECT = '''
     var depmapTpl = window.__DEPMAP_URL__ || "https://depmap.org/portal/gene/{gene}";
     var pageSize = window.__PAGE_SIZE__ || 5;
     var axis = window.__AXIS_LABELS__ || {x: "X", y: "Y", z: "Z"};
+    var axisHelp = window.__AXIS_HELP__ || {};
     var plates = window.__PLATES__ || [];
     var ticked = {};
     plates.forEach(function(p) { ticked[p] = true; });
@@ -1028,11 +1064,18 @@ _INTERFACE_INJECT = '''
     var gd = document.querySelector(".plotly-graph-div") || document.querySelector(".js-plotly-plot");
     if (!gd) return;
 
-    function axLine(k, lab) {
-      return '<span class="ax"><b>' + k + '</b> <span class="lab">' + (lab || '') + '</span></span>';
-    }
-    legEl.innerHTML = '<div class="title">ⓘ Axis legend</div>'
-      + axLine('X', axis.x) + axLine('Y', axis.y) + axLine('Z', axis.z);
+    // Axis legend with per-axis explanations shown as a hover tooltip (like
+    // plot_target_3d). Build via DOM + the title property so help text needs no
+    // HTML escaping.
+    legEl.innerHTML = '<div class="title">ⓘ Axis legend (hover for details)</div>';
+    ['x', 'y', 'z'].forEach(function(k, i) {
+      var sp = document.createElement('span');
+      sp.className = 'ax';
+      if (axisHelp[k]) sp.title = axisHelp[k];
+      sp.innerHTML = '<b>' + ['X', 'Y', 'Z'][i] + '</b> <span class="lab"></span>';
+      sp.querySelector('.lab').textContent = axis[k] || '';
+      legEl.appendChild(sp);
+    });
 
     var pinned = false;
     var currentGene = "";
@@ -1087,6 +1130,46 @@ _INTERFACE_INJECT = '''
         if (!isNaN(v) && (b === null || v < b)) b = v;
       });
       return b === null ? '' : b.toFixed(2);
+    }
+
+    function rbEsc(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    function renderResearch(gene) {
+      if (!researchBox) return;
+      var r = research[gene];
+      if (!r) { researchBox.style.display = "none"; return; }
+      var conf = (r.confidence || '').toLowerCase();
+      var cc = conf.indexOf('high') >= 0 ? '#2A9D8F'
+             : conf.indexOf('low') >= 0 ? '#E63946' : '#E9A23B';
+      function sec(lab, val) {
+        if (val == null || val === '' || val.length === 0) return '';
+        var txt = Array.isArray(val) ? val.map(rbEsc).join(', ') : rbEsc(val);
+        return '<div class="rb-sec"><span class="rb-lab">' + lab + ':</span> ' + txt + '</div>';
+      }
+      var html = '<div class="rb-head"><span class="rb-gene">'
+               + rbEsc(r.gene_name || gene) + '</span>'
+               + (r.confidence ? '<span class="rb-conf" style="background:' + cc + ';">'
+                                 + rbEsc(r.confidence) + ' conf</span>' : '')
+               + (r.target_class ? '<span class="rb-class">' + rbEsc(r.target_class) + '</span>' : '')
+               + '</div>';
+      html += sec('LoF benefit', r.lof_therapeutic_benefit);
+      html += sec('Degrader vs inhibitor', r.degrader_vs_inhibitor_rationale);
+      html += sec('Degrader feasibility', r.degrader_feasibility);
+      html += sec('DepMap dependency', r.depmap_dependency);
+      html += sec('Top indications', r.opentargets_top_indications);
+      html += sec('Existing degraders', r.existing_degraders);
+      html += sec('Safety flags', r.safety_flags);
+      html += sec('Biology', r.biology_rationale);
+      if (Array.isArray(r.sources) && r.sources.length) {
+        var links = r.sources.map(function(u, i) {
+          return '<a href="' + rbEsc(u) + '" target="_blank" rel="noopener">[' + (i + 1) + ']</a>';
+        }).join('');
+        html += '<div class="rb-sec rb-src"><span class="rb-lab">Sources:</span> ' + links + '</div>';
+      }
+      researchBox.innerHTML = html;
+      researchBox.style.display = "block";
     }
 
     function positionPatBox() {
@@ -1193,6 +1276,7 @@ _INTERFACE_INJECT = '''
       meta.textContent = metaTxt;
       renderPage();
       renderPatents(gene);
+      renderResearch(gene);
       return true;
     }
     function unpin() {
@@ -1202,6 +1286,7 @@ _INTERFACE_INJECT = '''
       box.style.display = "none";
       volBox.style.display = "none";
       if (patBox) { patBox.classList.remove("pinned"); patBox.style.display = "none"; }
+      if (researchBox) { researchBox.classList.remove("pinned"); researchBox.style.display = "none"; }
     }
     function goPage(delta) {
       var vis = entries.filter(function(e) { return entryVisible(e.t); });
@@ -1221,6 +1306,11 @@ _INTERFACE_INJECT = '''
     // the browser only fetches each PNG when its panel is actually shown.
     var VMODE = window.__VOLCANO_MODE__ || "b64";
     function vimg(v) {
+      // 'svg' -> interactive <object> (native <title> tooltips on significant
+      // points); 'path' -> external PNG <img>; 'b64' -> inline PNG <img>.
+      if (VMODE === "svg") {
+        return '<object class="vobj" type="image/svg+xml" data="' + v + '"></object>';
+      }
       var src = (VMODE === "path") ? v : ("data:image/png;base64," + v);
       return '<img loading="lazy" src="' + src + '"/>';
     }
@@ -1294,6 +1384,7 @@ _INTERFACE_INJECT = '''
       if (pinned) return;
       box.style.display = "none";
       if (patBox) patBox.style.display = "none";
+      if (researchBox) researchBox.style.display = "none";
     });
     gd.on("plotly_click", function(e) {
       if (render(e.points && e.points[0])) {
@@ -1301,6 +1392,7 @@ _INTERFACE_INJECT = '''
         box.classList.add("pinned");
         box.style.display = "block";
         if (patBox) patBox.classList.add("pinned");
+        if (researchBox) researchBox.classList.add("pinned");
       }
     });
     clo.addEventListener("click", unpin);
@@ -1357,6 +1449,16 @@ _INTERFACE_INJECT = '''
     if (R && typeof Plotly !== "undefined") {
       var rp = document.getElementById("range-panel");
       rp.style.display = "block";          // always visible once sliders are configured
+      // park the axis legend immediately above the (variable-height) slider box.
+      // Use offsetHeight (stable once laid out) + a ResizeObserver so it tracks the
+      // panel's final size instead of a stale pre-layout measurement.
+      function positionAxisLegend() {
+        if (legEl) legEl.style.bottom = (12 + rp.offsetHeight + 8) + "px";
+      }
+      positionAxisLegend();
+      window.addEventListener("resize", positionAxisLegend);
+      if (window.ResizeObserver) new ResizeObserver(positionAxisLegend).observe(rp);
+      else setTimeout(positionAxisLegend, 200);
       var AX = ["x", "y", "z"];
       var els = {}, orig = {};
       function fmt(v) { return (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2)); }
@@ -1367,8 +1469,9 @@ _INTERFACE_INJECT = '''
       function captureOrig() {
         orig = {};
         R.areaTraces.forEach(function(ti, i) {
-          var d = AREA[i] || {x: [], y: [], z: [], gene: []};
-          orig[ti] = {x: d.x, y: d.y, z: d.z, text: d.gene, cd: d.gene};
+          var d = AREA[i] || {x: [], y: [], z: [], gene: [], hover: []};
+          orig[ti] = {x: d.x, y: d.y, z: d.z, text: d.gene, cd: d.gene,
+                      hover: d.hover || []};
         });
       }
       function applyRanges() {
@@ -1404,13 +1507,14 @@ _INTERFACE_INJECT = '''
         // always keep their gene-name label.
         R.areaTraces.forEach(function(ti) {
           var o = orig[ti], m = masks[ti]; if (!o || !m || !gd.data[ti]) return;
-          var fx = [], fy = [], fz = [], ft = [], fcd = [];
+          var fx = [], fy = [], fz = [], ft = [], fcd = [], fhov = [];
           for (var k = 0; k < m.length; k++) if (m[k]) {
             fx.push(o.x[k]); fy.push(o.y[k]); fz.push(o.z[k]);
-            ft.push(o.text[k]); fcd.push(o.cd[k]);
+            ft.push(o.text[k]); fcd.push(o.cd[k]); fhov.push(o.hover[k]);
           }
           var tr = gd.data[ti];
           tr.x = fx; tr.y = fy; tr.z = fz; tr.text = ft; tr.customdata = fcd;
+          tr.hovertext = fhov;   // keep the tooltip aligned with the filtered points
         });
         Plotly.redraw(gd);
         document.getElementById("rp-count").textContent = total + " in range";
@@ -1888,6 +1992,7 @@ def plot_3d_interface(
     x_label='SAR predictability (R²)',
     y_label='OpenTargets association_score',
     z_label='MS score',
+    axis_help=None,
     z_log=False,
     z_clip_upper=None,
     gene_col='gene',
@@ -1916,6 +2021,9 @@ def plot_3d_interface(
     title='SAR predictability × disease association × MS score',
     range_sliders=False,
     range_defaults=None,
+    control_genes=(),
+    gene_research=None,
+    volcano_significant=False,
     volcano_dir=None,
     html_path=None,
     height=900,
@@ -1983,6 +2091,23 @@ def plot_3d_interface(
 
     if disease_area_colors is None:
         disease_area_colors = {}
+
+    # Per-axis explanations shown on hover over the axis legend (like plot_target_3d).
+    # Defaults describe the FBX interface axes; override any via `axis_help`.
+    _axis_help = {
+        'x': ('SAR predictability (R²): 5-fold cross-validated R² between '
+              'chemistry-predicted and observed per-compound logfc for this gene. '
+              'Higher = the compound structure explains more of its effect on the '
+              'target, i.e. the SAR is more learnable/predictable.'),
+        'y': ('OpenTargets association_score: target–disease association score '
+              '(max across the priority disease areas). Higher = more '
+              'genetic/clinical/literature evidence linking the gene to disease.'),
+        'z': ('MS score: the FBX mass-spec proteomics score for the target — its '
+              'strongest down-modulation signal across compounds. Higher = a '
+              'stronger / more reproducible significant down-regulation.'),
+    }
+    if axis_help:
+        _axis_help.update(axis_help)
 
     # 0) normalise the gene column to 'gene' so the rest mirrors plot_target_3d
     df = target_df.copy()
@@ -2283,6 +2408,11 @@ def plot_3d_interface(
         #     otherwise they're embedded as base64 in the customdata.
         if _vsrc is not None and tasks:
             import hashlib
+            # Significant-only volcanoes render as INTERACTIVE SVG (rasterised grey
+            # cloud + vector significant points carrying <title> hover tooltips);
+            # otherwise plain PNG. SVGs are shown via <object>, PNGs via <img>.
+            _sig = bool(volcano_significant) and ('significant' in _vsrc.columns)
+            _ext = '.svg' if _sig else '.png'
             _external = bool(volcano_dir) and bool(html_path)
             if _external:
                 os.makedirs(volcano_dir, exist_ok=True)
@@ -2290,10 +2420,10 @@ def plot_3d_interface(
                     volcano_dir, os.path.dirname(os.path.abspath(html_path))).replace(os.sep, '/')
 
                 def _vfname(g, vk):
-                    key = f'{g}|{vk}|{volcano_xlim[0]}|{volcano_xlim[1]}|{volcano_size_px}'
-                    return hashlib.md5(key.encode()).hexdigest()[:16] + '.png'
+                    key = f'{g}|{vk}|{volcano_xlim[0]}|{volcano_xlim[1]}|{volcano_size_px}|{_ext}'
+                    return hashlib.md5(key.encode()).hexdigest()[:16] + _ext
 
-                # cache hits: PNG already on disk -> reference it, skip render
+                # cache hits: file already on disk -> reference it, skip render
                 render = []
                 for (g, vk, ei, pi) in tasks:
                     fn_ = _vfname(g, vk)
@@ -2306,18 +2436,25 @@ def plot_3d_interface(
                 render = [(g, vk, ei, pi, None) for (g, vk, ei, pi) in tasks]
                 n_cached = 0
 
-            def _store(g, ei, pi, fn_, b64):
-                # external: write PNG + store its relative path ('' on failure);
-                # embedded: store the base64 string directly.
+            def _store(g, ei, pi, fn_, content):
+                # content = SVG text (_sig) or base64 PNG. External: write the file
+                # and store its relative path; embedded: store an inline value
+                # (data-URI SVG, or raw base64 PNG). '' on failure.
+                if not content:
+                    _set_volcano(g, ei, pi, '')
+                    return
                 if _external:
-                    if b64:
-                        with open(os.path.join(volcano_dir, fn_), 'wb') as _fh:
-                            _fh.write(base64.b64decode(b64))
-                        _set_volcano(g, ei, pi, _rel + '/' + fn_)
-                    else:
-                        _set_volcano(g, ei, pi, '')
+                    mode_ = 'w' if _sig else 'wb'
+                    data_ = content if _sig else base64.b64decode(content)
+                    with open(os.path.join(volcano_dir, fn_), mode_,
+                              **({'encoding': 'utf-8'} if _sig else {})) as _fh:
+                        _fh.write(data_)
+                    _set_volcano(g, ei, pi, _rel + '/' + fn_)
+                elif _sig:
+                    _set_volcano(g, ei, pi, 'data:image/svg+xml;base64,'
+                                 + base64.b64encode(content.encode()).decode())
                 else:
-                    _set_volcano(g, ei, pi, b64)
+                    _set_volcano(g, ei, pi, content)
 
             n_render = len(render)
             if n_render == 0:
@@ -2326,21 +2463,28 @@ def plot_3d_interface(
                 import matplotlib.pyplot as plt
                 pbar = tqdm(total=n_render, desc='volcanoes', unit='cmp', mininterval=0.5)
                 for g, vk, ei, pi, fn_ in render:
-                    fig_v, ax_v = plt.subplots(
-                        figsize=(volcano_size_px / 100, volcano_size_px / 100), dpi=100)
                     try:
-                        plot_volcano(_vsrc, vk, g,
-                                     xmin=volcano_xlim[0], xmax=volcano_xlim[1],
-                                     ax=ax_v, title='')
-                        buf = io.BytesIO()
-                        fig_v.savefig(buf, format='PNG', bbox_inches='tight')
-                        b64 = base64.b64encode(buf.getvalue()).decode()
+                        if _sig:
+                            content = _volcano_svg_string(
+                                _vsrc, vk, g, key='compound', sig_col='significant',
+                                xmin=volcano_xlim[0], xmax=volcano_xlim[1],
+                                size_px=volcano_size_px)
+                        else:
+                            fig_v, ax_v = plt.subplots(
+                                figsize=(volcano_size_px / 100, volcano_size_px / 100), dpi=100)
+                            try:
+                                plot_volcano(_vsrc, vk, g,
+                                             xmin=volcano_xlim[0], xmax=volcano_xlim[1],
+                                             ax=ax_v, title='')
+                                buf = io.BytesIO()
+                                fig_v.savefig(buf, format='PNG', bbox_inches='tight')
+                                content = base64.b64encode(buf.getvalue()).decode()
+                            finally:
+                                plt.close(fig_v)
                     except Exception as e:
                         tqdm.write(f'  [warn] volcano failed {g}/{vk}: {e}')
-                        b64 = ''
-                    finally:
-                        plt.close(fig_v)
-                    _store(g, ei, pi, fn_, b64)
+                        content = ''
+                    _store(g, ei, pi, fn_, content)
                     pbar.update(1)
                 pbar.close()
             else:
@@ -2348,12 +2492,13 @@ def plot_3d_interface(
                 import joblib as _joblib
                 from joblib import Parallel, delayed
                 unique_keys = sorted({vk for _, vk, _, _, _ in render})
-                _cols = ['compound', 'genes', 'logfc', 'pvalue']
+                _cols = ['compound', 'genes', 'logfc', 'pvalue'] + (['significant'] if _sig else [])
                 _filt = _vsrc.loc[_vsrc['compound'].isin(unique_keys), _cols].dropna()
                 sub_cache = {c: g for c, g in _filt.groupby('compound', sort=False)}
                 _empty = _filt.iloc[0:0]
                 print(f'> rendering {n_render:,} volcanoes on {volcano_n_jobs} workers'
-                      + (f' ({n_cached:,} cached)' if _external else '') + '...', flush=True)
+                      + (f' ({n_cached:,} cached)' if _external else '')
+                      + (' [significant SVG]' if _sig else '') + '...', flush=True)
 
                 @contextlib.contextmanager
                 def _tqdm_joblib(pbar):
@@ -2374,12 +2519,13 @@ def plot_3d_interface(
                     results = Parallel(n_jobs=volcano_n_jobs, backend='loky')(
                         delayed(_volcano_render_worker)(
                             (g, vk, sub_cache.get(vk, _empty), volcano_size_px,
-                             volcano_xlim[0], volcano_xlim[1]))
+                             volcano_xlim[0], volcano_xlim[1], _sig))
                         for g, vk, _, _, _ in render)
-                for (g, vk, ei, pi, fn_), b64 in zip(render, results):
-                    _store(g, ei, pi, fn_, b64)
+                for (g, vk, ei, pi, fn_), content in zip(render, results):
+                    _store(g, ei, pi, fn_, content)
             print(f'> volcanoes: {n_cached:,} cached, {n_render:,} rendered'
-                  + (f' -> {volcano_dir}' if _external else ' (embedded base64)'))
+                  + (' [interactive SVG]' if _sig else '')
+                  + (f' -> {volcano_dir}' if _external else ' (embedded)'))
         elif _vsrc is None:
             print('> no volcano source (pass df_raw or volcano_source) — volcanoes disabled')
     else:
@@ -2410,37 +2556,53 @@ def plot_3d_interface(
     hl = highlighted.copy()
     hl['_area'] = (hl['disease_area'].fillna(NA_LABEL)
                    if 'disease_area' in hl.columns else NA_LABEL)
-    area_order = [a for a in disease_area_colors if a in hl['_area'].values]
-    if NA_LABEL in hl['_area'].values:
+    # Control targets (e.g. GAK) — genes whose only significant compound(s) are
+    # controls — are drawn as grey diamonds in a dedicated "control" trace, pulled
+    # out of their disease-area group. (Plotly 3D has no 'star' marker; 'diamond'
+    # is the closest distinct symbol.)
+    hl['_ctrl'] = hl['gene'].isin(set(control_genes))
+    area_order = [a for a in disease_area_colors if a in hl.loc[~hl['_ctrl'], '_area'].values]
+    if NA_LABEL in hl.loc[~hl['_ctrl'], '_area'].values:
         area_order.append(NA_LABEL)
 
-    area_data = []   # plain coord arrays per area trace, for the slider JS (Plotly
-                     # stores trace x/y/z as base64-encoded objects, not JS arrays)
-    for area in area_order:
-        grp = hl[hl['_area'] == area]
-        color = disease_area_colors.get(area, na_area_color)
+    area_data = []          # plain coord arrays per colour trace, for the slider JS
+    area_trace_indices = []  # trace indices that the sliders restyle (colour traces)
+
+    def _add_colour_trace(grp, name, color, symbol='circle', size=6):
         trace_kw = dict(
             x=grp[x_col], y=grp[y_col], z=grp['_zplot'],
             mode='markers+text',
-            marker=dict(size=6, color=color, opacity=0.95,
+            marker=dict(size=size, color=color, symbol=symbol, opacity=0.95,
                         line=dict(color='#333', width=1)),
             text=grp['gene'], textposition='top center',
             textfont=dict(size=10, color='black'),
             hovertext=_hover_text(grp), hoverinfo='text',
-            name=f'{area} ({len(grp)})',
+            name=name,
         )
         if have_compounds:
-            # customdata = just the gene name (one simple string per point). The
-            # heavy per-gene compound entries live in the injected __GENE_COMPOUNDS__
-            # map instead — so restyles only move tiny string arrays.
+            # customdata = just the gene name; heavy entries live in __GENE_COMPOUNDS__.
             trace_kw['customdata'] = list(grp['gene'])
         fig.add_trace(go.Scatter3d(**trace_kw))
+        area_trace_indices.append(len(fig.data) - 1)
         area_data.append({
             'x': [float(v) for v in grp[x_col]],
             'y': [float(v) for v in grp[y_col]],
             'z': [float(v) for v in grp['_zplot']],
             'gene': list(grp['gene']),
+            'hover': list(_hover_text(grp)),
         })
+
+    for area in area_order:
+        grp = hl[(hl['_area'] == area) & (~hl['_ctrl'])]
+        if grp.empty:
+            continue
+        _add_colour_trace(grp, f'{area} ({len(grp)})',
+                          disease_area_colors.get(area, na_area_color))
+
+    ctrl_grp = hl[hl['_ctrl']]
+    if not ctrl_grp.empty:
+        _add_colour_trace(ctrl_grp, f'control ({len(ctrl_grp)})',
+                          '#9e9e9e', symbol='diamond', size=7)
 
     # Range-slider config. The colour traces are indices 1..N (trace 0 = grey
     # backdrop); the JS slices them to the in-range subset on each slider move.
@@ -2476,7 +2638,7 @@ def plot_3d_interface(
             'x': _axis_cfg(xv, x_label),
             'y': _axis_cfg(yv, y_label),
             'z': _axis_cfg(zv, z_label),
-            'areaTraces': list(range(1, 1 + len(area_order))),
+            'areaTraces': area_trace_indices,
             'labelMax': max(70, target + 10),
         }
         # Per-axis default lower-handle overrides, e.g. {'y': 0.35} to start the
@@ -2522,9 +2684,13 @@ def plot_3d_interface(
             'window.__RANGES__ = ' + _json.dumps(ranges_cfg) + ';\n'
             'window.__AREA_DATA__ = ' + _json.dumps(area_data) + ';\n'
             'window.__VOLCANO_MODE__ = '
-            + _json.dumps('path' if (volcano_dir and html_path) else 'b64') + ';\n'
+            + _json.dumps('svg' if (volcano_significant and 'significant'
+                                    in (volcano_source.columns if volcano_source is not None else []))
+                          else ('path' if (volcano_dir and html_path) else 'b64')) + ';\n'
             'window.__AXIS_LABELS__ = '
-            + _json.dumps({'x': x_label, 'y': y_label, 'z': z_label}) + ';</script>')
+            + _json.dumps({'x': x_label, 'y': y_label, 'z': z_label}) + ';\n'
+            'window.__AXIS_HELP__ = ' + _json.dumps(_axis_help) + ';\n'
+            'window.__GENE_RESEARCH__ = ' + _json.dumps(gene_research or {}) + ';</script>')
         with open(html_path) as fh:
             html = fh.read()
         with open(html_path, 'w') as fh:
@@ -2632,6 +2798,113 @@ def plot_volcano(df, compound, gene,
     return agg
 
 
+def plot_volcano_significant(df, uniquecontrast, gene,
+                             *,
+                             key='uniquecontrast',
+                             sig_col='significant',
+                             fc_thresh=1.0, p_thresh=0.05,
+                             xmin=-5.0, xmax=5.0,
+                             figsize=(6, 6), dpi=100,
+                             up_color='#008bfb', down_color='#ff0051',
+                             ns_color='lightgrey',
+                             ax=None, title=None):
+    """
+    Volcano for a single experiment (``uniquecontrast``), colouring ONLY the
+    targets flagged *significant* — up (logfc > 0) in ``up_color``, down
+    (logfc < 0) in ``down_color`` — with every other gene left grey. ``gene``
+    is ringed + annotated so you can see where the target of interest lands.
+
+    Significance is read from the ``sig_col`` column when present (e.g.
+    ``FBX_MEASURE``'s ``significant`` 0/1 flag); if that column is absent it
+    falls back to ``|logfc| >= fc_thresh & pvalue <= p_thresh``. The dashed
+    reference lines always reflect ``fc_thresh`` / ``p_thresh``.
+
+    Sibling of :func:`plot_volcano`, but keyed on ``uniquecontrast`` (one
+    experiment) instead of ``compound``, and gating colour on the significance
+    flag rather than the thresholds.
+
+    :param df df: long table with ``key``, ``genes``, ``logfc``, ``pvalue``
+        (optionally ``sig_col``). For the FBX data this is ``FBX_MEASURE``.
+    :param str uniquecontrast: the experiment id to plot (value in ``key``).
+    :param str gene: gene symbol to ring/annotate; silently skipped if absent.
+    :param str key: column identifying the experiment (default ``'uniquecontrast'``).
+    :param str sig_col: significance-flag column; threshold fallback if missing.
+    :param float fc_thresh, p_thresh: thresholds for the dashed guides (and the
+        significance fallback when ``sig_col`` is absent).
+    :param float xmin, xmax: x-axis (logfc) limits.
+    :param str up_color, down_color, ns_color: dot colours.
+    :param Axes ax: draw into an existing Axes; new figure if ``None``.
+    :param str title: ``None`` -> default caption; ``''`` -> no title; else verbatim.
+    :return df: per-gene aggregate (``genes``, ``logfc``, ``pvalue``,
+        ``nlog10p``, ``significant``).
+    """
+    import matplotlib.pyplot as plt
+
+    has_sig = sig_col in df.columns
+    cols = ['genes', 'logfc', 'pvalue'] + ([sig_col] if has_sig else [])
+    sub = df[df[key] == uniquecontrast][cols].dropna(subset=['genes', 'logfc', 'pvalue'])
+    if sub.empty:
+        print(f'> {uniquecontrast}: no rows for {key}')
+        return None
+
+    # collapse any duplicate gene rows (e.g. multiple protein groups): mean
+    # logfc, min p-value, and significant-if-any across them.
+    aggspec = {'logfc': ('logfc', 'mean'), 'pvalue': ('pvalue', 'min')}
+    if has_sig:
+        aggspec['significant'] = (sig_col, 'max')
+    agg = sub.groupby('genes').agg(**aggspec).reset_index()
+    agg['nlog10p'] = -np.log10(agg['pvalue'].clip(lower=1e-300))
+
+    if 'significant' in agg.columns:
+        sig = agg['significant'].astype(float) > 0
+    else:
+        sig = (agg['logfc'].abs() >= fc_thresh) & (agg['pvalue'] <= p_thresh)
+        agg['significant'] = sig.astype(int)
+    up   = sig & (agg['logfc'] > 0)
+    down = sig & (agg['logfc'] < 0)
+    ns   = ~sig
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    ax.scatter(agg.loc[ns,   'logfc'], agg.loc[ns,   'nlog10p'],
+               s=8,  c=ns_color,   edgecolor='none', alpha=0.5,
+               label=f'ns ({int(ns.sum())})')
+    ax.scatter(agg.loc[up,   'logfc'], agg.loc[up,   'nlog10p'],
+               s=12, c=up_color,   edgecolor='none', alpha=0.9,
+               label=f'sig up ({int(up.sum())})')
+    ax.scatter(agg.loc[down, 'logfc'], agg.loc[down, 'nlog10p'],
+               s=12, c=down_color, edgecolor='none', alpha=0.9,
+               label=f'sig down ({int(down.sum())})')
+
+    # threshold guides
+    ax.axhline(-np.log10(p_thresh), ls='--', lw=0.7, c='#888')
+    ax.axvline(+fc_thresh,          ls='--', lw=0.7, c='#888')
+    ax.axvline(-fc_thresh,          ls='--', lw=0.7, c='#888')
+
+    # highlight target gene
+    tg = agg[agg['genes'] == gene]
+    if tg.empty:
+        print(f'> {gene} not measured in {uniquecontrast}')
+    else:
+        ax.scatter(tg['logfc'], tg['nlog10p'],
+                   s=70, facecolor='none', edgecolor='black', lw=1.5, zorder=5)
+        ax.annotate(gene,
+                    xy=(tg['logfc'].iat[0], tg['nlog10p'].iat[0]),
+                    xytext=(8, 6), textcoords='offset points',
+                    fontsize=11, fontweight='bold',
+                    arrowprops=dict(arrowstyle='-', lw=0.7))
+
+    ax.set_xlim(xmin, xmax)
+    ax.set_xlabel('logfc')
+    ax.set_ylabel('-log10(p-value)')
+    if title is None:
+        title = f'{uniquecontrast}  ({len(agg):,} genes, {int(sig.sum())} significant)'
+    ax.set_title(title)
+    ax.legend(loc='best', fontsize=8, frameon=False)
+    plt.tight_layout()
+    return agg
+
+
 def _build_gene_patents_html_map(gene_patents_df, top_n, depmap_url_template):
     """Build {gene: <html>} for the per-gene patents panel.
 
@@ -2681,19 +2954,114 @@ def _build_gene_patents_html_map(gene_patents_df, top_n, depmap_url_template):
     return out
 
 
-def _volcano_render_worker(args):
-    """Module-level worker used by `plot_target_3d` when `n_jobs > 1`.
+def _volcano_svg_string(df, uniquecontrast, gene,
+                        *,
+                        key='uniquecontrast', sig_col='significant',
+                        fc_thresh=1.0, p_thresh=0.05,
+                        xmin=-8.0, xmax=8.0, size_px=350,
+                        up_color='#008bfb', down_color='#ff0051', ns_color='lightgrey'):
+    """
+    Render the significant-only volcano (one ``uniquecontrast``) to an *interactive*
+    SVG string. The dense non-significant cloud is rasterised (keeps the file small),
+    while each significant point is a vector marker carrying a ``<title>`` (gene
+    name) so a browser shows a native hover tooltip — like the 3D dots. The target
+    ``gene`` is ringed + annotated. Returns ``''`` on empty/failure.
+    """
+    import io
+    import xml.etree.ElementTree as ET
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
 
-    Has to be at module level so loky/cloudpickle can serialize it by
-    reference rather than trying to pickle a closure. Receives a small
-    pre-sliced per-compound DataFrame instead of the full ``df_raw`` to
-    keep the per-task IPC payload tiny.
+    has_sig = sig_col in df.columns
+    cols = ['genes', 'logfc', 'pvalue'] + ([sig_col] if has_sig else [])
+    sub = df[df[key] == uniquecontrast][cols].dropna(subset=['genes', 'logfc', 'pvalue'])
+    if sub.empty:
+        return ''
+    aggspec = {'logfc': ('logfc', 'mean'), 'pvalue': ('pvalue', 'min')}
+    if has_sig:
+        aggspec['significant'] = (sig_col, 'max')
+    agg = sub.groupby('genes').agg(**aggspec).reset_index()
+    agg['nlog10p'] = -np.log10(agg['pvalue'].clip(lower=1e-300))
+    if 'significant' in agg.columns:
+        sig = agg['significant'].astype(float) > 0
+    else:
+        sig = (agg['logfc'].abs() >= fc_thresh) & (agg['pvalue'] <= p_thresh)
+    up = sig & (agg['logfc'] > 0)
+    down = sig & (agg['logfc'] < 0)
+    ns = ~sig
+
+    fig, ax = plt.subplots(figsize=(size_px / 100, size_px / 100), dpi=100)
+    gid2gene = {}
+    try:
+        # rasterised grey background (one image inside the SVG, not thousands of nodes)
+        ax.scatter(agg.loc[ns, 'logfc'], agg.loc[ns, 'nlog10p'], s=6, c=ns_color,
+                   edgecolor='none', alpha=0.5, rasterized=True, zorder=1)
+        i = 0
+        for mask, color in [(down, down_color), (up, up_color)]:
+            for _, r in agg.loc[mask].iterrows():
+                gid = f'sig{i}'
+                sc = ax.scatter([r['logfc']], [r['nlog10p']], s=14, c=color,
+                                edgecolor='none', zorder=3)
+                sc.set_gid(gid)
+                gid2gene[gid] = str(r['genes'])
+                i += 1
+        ax.axhline(-np.log10(p_thresh), ls='--', lw=0.7, c='#888')
+        ax.axvline(+fc_thresh, ls='--', lw=0.7, c='#888')
+        ax.axvline(-fc_thresh, ls='--', lw=0.7, c='#888')
+        tg = agg[agg['genes'] == gene]
+        if not tg.empty:
+            ax.scatter(tg['logfc'], tg['nlog10p'], s=70, facecolor='none',
+                       edgecolor='black', lw=1.5, zorder=5)
+            ax.annotate(gene, xy=(tg['logfc'].iat[0], tg['nlog10p'].iat[0]),
+                        xytext=(8, 6), textcoords='offset points',
+                        fontsize=11, fontweight='bold',
+                        arrowprops=dict(arrowstyle='-', lw=0.7))
+        ax.set_xlim(xmin, xmax)
+        ax.set_xlabel('logfc')
+        ax.set_ylabel('-log10(p-value)')
+        ax.set_title('')   # the panel labels the volcano in HTML
+        buf = io.StringIO()
+        fig.savefig(buf, format='svg', bbox_inches='tight')
+    except Exception:
+        plt.close(fig)
+        return ''
+    plt.close(fig)
+
+    # inject <title>gene</title> into each significant point's <g id="sig*">
+    try:
+        ET.register_namespace('', 'http://www.w3.org/2000/svg')
+        root = ET.fromstring(buf.getvalue())
+        ns_uri = '{http://www.w3.org/2000/svg}'
+        for el in root.iter():
+            gid = el.get('id')
+            if gid in gid2gene:
+                t = ET.SubElement(el, ns_uri + 'title')
+                t.text = gid2gene[gid]
+                el.insert(0, t)
+        return ET.tostring(root, encoding='unicode')
+    except Exception:
+        return buf.getvalue()
+
+
+def _volcano_render_worker(args):
+    """Module-level worker used by `plot_target_3d` / `plot_3d_interface` when
+    `n_jobs > 1`.
+
+    At module level so loky/cloudpickle can serialise it by reference. Receives a
+    small pre-sliced per-key DataFrame instead of the full source. Returns a
+    base64 PNG, or — when ``significant`` is set — an interactive SVG string.
     """
     import io, base64
     import matplotlib
     matplotlib.use('Agg')  # headless backend in workers
     import matplotlib.pyplot as plt
-    gene, compound, sub, size_px, xmin, xmax = args
+    gene, compound, sub, size_px, xmin, xmax = args[:6]
+    significant = args[6] if len(args) > 6 else False
+    if significant:
+        return _volcano_svg_string(sub, compound, gene, key='compound',
+                                   sig_col='significant',
+                                   xmin=xmin, xmax=xmax, size_px=size_px)
     fig, ax = plt.subplots(figsize=(size_px / 100, size_px / 100), dpi=100)
     try:
         plot_volcano(sub, compound, gene,
