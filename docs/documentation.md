@@ -1,6 +1,6 @@
 # Notebook documentation
 
-Four Jupyter notebooks in [`vignettes/`](../vignettes/) make up the
+Five Jupyter notebooks in [`vignettes/`](../vignettes/) make up the
 end-to-end MS-proteomics SAR analysis. They share the same upstream data
 ([`data/MS/`](../data/MS)) and helper modules (`python/`, `Scripts/`),
 but each one answers a different question:
@@ -11,8 +11,9 @@ but each one answers a different question:
 | [`MS_Plate_analysis.ipynb`](../vignettes/MS_Plate_analysis.ipynb)              | "Which plates carry usable signal vs scale-compressed noise?"                      |
 | [`MS_TargetML.ipynb`](../vignettes/MS_TargetML.ipynb)                          | "Which target genes have predictable SAR *and* pharma/disease relevance?"          |
 | [`MS_ML_Prioritization.ipynb`](../vignettes/MS_ML_Prioritization.ipynb)        | "Given a trained gene-model, which library / virtual compounds should we screen?"  |
+| [`MS_Interface.ipynb`](../vignettes/MS_Interface.ipynb)                        | "Interactively browse FBX targets by SAR/disease/MS score, their hit compounds, volcanoes, and degradation research." |
 
-All three follow the project conventions in [`CLAUDE.md`](../CLAUDE.md):
+All follow the project conventions in [`CLAUDE.md`](../CLAUDE.md):
 heavy intermediates persisted under `data/`/`output/`, parameters in
 config files where applicable, no project data sent to any cloud service.
 
@@ -90,7 +91,7 @@ goes to chemistry meetings.
 - `RAW_PROTEOMICS_PATH`, `CHEMLIB_PATH` — same as Plate analysis.
 - `OT_ROOT` / `OT_CACHE` — OpenTargets target-disease scores, cached under `output/MS/opentargets_target_disease.parquet`.
 - [`data/patent/20260512_pharma_sm.csv`](../data/patent/20260512_pharma_sm.csv) — big-pharma small-molecule patent targets, used for the `pharma` disease-area override. Built from the Dropbox-side master xlsx (`PATENTS_RAW`) via the resolver in `data/patent/`; bump the dated filename and re-run when the master updates.
-- `data/srb_png/<compound>.png` — pre-rendered compound thumbnails for the 3D viz hover/pin panel. See [§ 4. Building `data/srb_png/`](#4-building-datasrb_png--cdd-vault-png-export) below for the download script.
+- `data/srb_png/<compound>.png` — pre-rendered compound thumbnails for the 3D viz hover/pin panel. See [§ 6. Building `data/srb_png/`](#6-building-datasrb_png--cdd-vault-png-export) below for the download script.
 
 **Pipeline**
 
@@ -140,7 +141,7 @@ restrict to the central |logfc|<0.5 band).
    - Highlight set: top-20 closest to the (↑,↑,↑) corner ∪ all genes with `overall_score > 1.5` ∪ all `must_include` (always includes the 'pharma' genes, see cell 33 `_pharma_show`).
    - Colour by `disease_area` using `DISEASE_AREA_COLORS`. Pharma override gets navy `#1D3557`.
    - **Per-point tooltip** (small box near the cursor): shows `gene`, R², `overall_score`, `fold`, `fisher_p` (from the MCS enrichment in cell 30, formatted as `< 0.0001` below the floor and `0.NNNN` otherwise), `n`, and `disease_area`.
-   - **Hover** the dot → top-right floating panel shows up to 5 compound thumbnails per gene + the gene-level `fisher_p`. Thumbnails come from `data/srb_png/<compound>.png` when available (see [§ 4](#4-building-datasrb_png--cdd-vault-png-export)), else fall back to RDKit rendering from SMILES.
+   - **Hover** the dot → top-right floating panel shows up to 5 compound thumbnails per gene + the gene-level `fisher_p`. Thumbnails come from `data/srb_png/<compound>.png` when available (see [§ 6](#6-building-datasrb_png--cdd-vault-png-export)), else fall back to RDKit rendering from SMILES.
    - **Click** the dot → the panel pins. Compound IDs become triple-click-selectable (copyable). Escape or × to unpin.
    - **In pinned mode, hover a compound thumbnail** → a per-(gene, compound) volcano plot appears below the panel (logfc × −log10 p, target gene ringed). Pre-rendered when `df_raw=` is passed to `plot_target_3d`; opt-in because it adds ~12-60 s render time depending on `volcano_n_jobs` (set `volcano_n_jobs=8` for the 8-CPU parallel path, default 1 = serial).
 6. **Top-compound contrast extraction** (cell 34) — for each (gene, top-K compound) pair, look up the matching `uniquecontrast` row in `df_raw` (Mascot / MaxQuant proxy diagnostics).
@@ -197,7 +198,149 @@ and write a prioritised SDF for chemistry to triage.
 
 ---
 
-## 5. Building `data/srb_png/` — CDD Vault PNG export
+## 5. `MS_Interface.ipynb` — interactive FBX target browser
+
+A standalone, fully interactive HTML "cockpit" for triaging the FBX
+target set. Unlike `MS_TargetML`'s `plot_target_3d` (static highlight,
+PNG hovers), this notebook builds `fn.plot_3d_interface` — a 3D scatter
+whose colouring is driven live by range sliders + checkbox filters, with
+interactive volcanoes and per-gene degradation research.
+
+**Inputs** (the `advantedge`/FBX tranche under `data/advanteidge/`)
+- `FBX_MSSCORE` — one row per gene after cell-8 processing (drop noisy
+  plates → keep max `ms_score_percent` per gene → inner-join the per-gene
+  R² table `GENE_SAR_OUT`). These are the **dots**, with axes
+  `R2` (x), `association_score` (y), `ms_score` (z). ~161 plottable genes
+  (need all three coordinates).
+- `FBX_MEASURE` — per (gene × experiment `uniquecontrast`) `logfc` /
+  `pvalue` / `significant`. The **volcano source**.
+- `FBX_REPORT` — maps `uniquecontrast → srbnumber` (+ plate, concentration,
+  `activity`). Used to link experiments to compounds (batch suffix stripped
+  to the `SRB-XXXXXXX` chem-lib key).
+- chem library (`CHEMLIB_PATH`) — SMILES for compound thumbnails.
+- `RESEARCH_161_T_20260604` — a JSON list (one record/gene) of degradation
+  research (loaded from a local path; see the load cell). Fields:
+  `target_class, lof_therapeutic_benefit, degrader_vs_inhibitor_rationale,
+  degrader_feasibility, depmap_dependency, opentargets_top_indications,
+  existing_degraders, safety_flags, confidence, biology_rationale, sources`.
+
+**Compound ↔ gene association.** A compound appears under a gene only
+where that gene is **significantly down-modulated** in the experiment —
+i.e. FBX's `significant == 1 & logfc < 0` (the dataset's own flag, *not* a
+`logfc`/p threshold). This matches the volcano colouring one-to-one. One
+panel entry per (gene, compound), carrying **all** its passing plates.
+
+**`fn.plot_3d_interface(...)`** writes a self-contained HTML to
+`DROPBOX_ML/interfaces/` with these layers (all verified in a headless
+browser):
+
+- **Dots** coloured by `disease_area` (pharma/BMS override as in
+  `MS_TargetML`). `customdata` is just the gene name; the heavy per-gene
+  compound entries live in an injected `__GENE_COMPOUNDS__` map (so slider
+  restyles only move tiny arrays — Plotly chokes on restyling jagged
+  nested customdata).
+- **Range sliders** (`range_sliders=True`) — dual-handle R² / association /
+  MS-score sliders, flattened into a 3-column bar bottom-left. A gene is
+  coloured iff it's in all three ranges **and** has a visible compound (see
+  filters). Defaults to a focused "high-on-all-three" box (~the corner
+  subset; binary-searched percentile), with the association handle starting
+  at `0.35` (`range_defaults={'y': 0.35}`). A handle within one step of its
+  limit is treated as unbounded so axis-extreme genes aren't dropped.
+- **Plate + Activity checkboxes** (top-left) — tick which plates / `activity`
+  levels count. **Option B**: a plate-row shows only if its plate *and*
+  activity are ticked; a compound lists only if it has a visible row; and a
+  **gene greys out of the 3D plot** if it has no compound on the ticked
+  plates/activities (`geneHasVisibleCompound`).
+- **Compound panel** (top-right, click a dot to pin) — paginated 5/page
+  (◀ ▶ / ←→), structure thumbnail + per-plate volcanoes; click a compound
+  to pin its volcano(s). Patents panel sits to its left.
+- **Volcanoes** — `fn.plot_volcano_significant` colours **only significant
+  targets** (up/down by logfc sign, rest grey; or **by biological function**
+  via `gene_category=`, see below), keyed by `uniquecontrast`,
+  `xlim=(-8, 8)`. Rendered as **interactive SVG** (`volcano_significant=True`):
+  the dense ~8k-point cloud is rasterised; each significant point is a vector
+  marker with a native `<title>` (gene name) → **hover shows the gene**, like
+  the 3D dots. Cached to `interfaces/volcanoes/<hash>.svg` and referenced via
+  `<object>` (tiny HTML, lazy-loaded, cached re-runs skip rendering).
+- **Control targets** (`control_genes`) — genes whose only significant
+  compound(s) are control compounds (`control_compounds`, e.g. GAK →
+  `SRB-0000692`) render as **grey diamonds** in a dedicated **"control"**
+  legend entry, pulled out of their disease-area colour.
+- **Research box** (bottom-right, on hover) — formatted degradation research
+  for the gene from `RESEARCH_161_T_20260604`: confidence badge, LoF benefit,
+  degrader rationale/feasibility, DepMap dependency, indications, safety,
+  biology, source links.
+- **Axis legend** (bottom-left, above the sliders; auto-positioned via a
+  `ResizeObserver`) — hover a row for the full explanation of each axis
+  (overridable via `axis_help=`).
+
+**Why most significant-down genes aren't on the plot.** ~2,250 genes are
+significantly down-modulated by ≥1 compound, but only the ~161 with FBX
+`ms_score` *and* an R² can be placed on the three axes — the rest are
+whole-proteome genes the FBX pipeline never scored. The plot already shows
+every *plottable* hit gene.
+
+**Key helpers** (in [`python/functions.py`](../python/functions.py))
+- `plot_3d_interface(target_df, *, x_col, y_col, z_col, compounds_df,
+  volcano_source, volcano_key, range_sliders, range_defaults, control_genes,
+  gene_research, volcano_significant, volcano_dir, axis_help, …)` — the
+  interface renderer. Long-format `compounds_df` (one row per
+  gene/compound/plate) drives the paginated, plate-aware panel.
+- `plot_volcano_significant(df, uniquecontrast, gene, …)` — significant-only
+  volcano keyed on `uniquecontrast`. Pass `gene_category=` (a `{gene: category}`
+  map from `fn.categorize_genes`) + `category_colors=` to colour significant
+  points by **biological function** instead of red/blue up/down — direction is
+  then shown by marker shape (▲ up, ▼ down).
+- `categorize_genes(gene2term, genes=None)` — map each gene to one coarse
+  functional category (`CATEGORY_KEYWORDS` / `CATEGORY_COLORS`) from its
+  GO/Reactome annotations by **specificity-weighted consensus** (each category
+  scores `Σ 1/√term_size` over the gene's terms, so many specific terms beat one
+  broad ancestor or incidental tiny term). ~90% of the Px universe gets a
+  specific label; heuristic, so multifunctional genes can be debatable (use
+  `explain_gene` for authoritative per-gene detail). Built on
+  `output/cell_signature/gene2term.parquet`.
+- `ora_enrichment(gene_set, background, gene2term, …)` — over-representation
+  analysis (**hypergeometric / one-tailed Fisher**) on a *thresholded* set
+  (e.g. significant-down genes), measured proteome as background, BH-FDR.
+  Maps 1:1 onto the coloured volcano points.
+- `gene_category_long(gene_category)` — reshape a `{gene: function}` map into a
+  `gene2term`-shaped frame so the coarse **functions** can be used as gene sets
+  in `ora_enrichment`/`gsea_preranked` (one enrichment score per function rather
+  than per GO term). Relax the size caps — categories are large.
+- `gsea_preranked(ranks, gene2term, …)` — **GSEA-preranked** (threshold-free):
+  ranks all measured proteins by a signed statistic and tests concentration at
+  the top/bottom via a size-matched permutation null (cached by size). Catches
+  coordinated subtle shifts ORA misses; processes called by *both* are the
+  trustworthy signal.
+- `signature_matrix_from_enrichment(func_enrich_all)` — pivot the per-compound
+  enrichment into a **compound × function fingerprint** (NES vector per compound).
+- `compound_distance_matrix(features, metric='cosine')` — pairwise compound ×
+  compound **distance** matrix (smaller = more similar; diagonal NaN), same layout
+  as `Rdkit_tools.get_*_distance_matrix`, so it feeds straight into
+  `Rdkit_tools.get_NN_from_dist_matrix(d, top=N)` for top-N nearest neighbours.
+  Cosine on the signature fingerprint = "same cell signature"; `metric='correlation'`
+  on a gene-level logfc table = CMap-style connectivity.
+- `plot_function_enrichment(df, sig=0.05, …)` — diverging **lollipop** of one
+  compound's per-function GSEA NES (suppressed/induced colour, significant rows
+  highlighted + `*`); readable replacement for the flat enrichment table.
+- `function_enrichment_all(df_raw, gene_category, n_perm=1000, n_jobs=8, …)` —
+  per-compound enrichment of the 15 functions for **every** compound, fanned out
+  across compounds with joblib (~25–35 min for 2,277 compounds; cache to
+  parquet). Returns tidy `compound × function` with `n_down/n_up`, `ora_down_fdr`,
+  `ora_up_fdr`, `gsea_NES`, `gsea_fdr`, `gsea_direction`. Built in MS_TargetML →
+  `output/cell_signature/compound_function_enrichment.parquet`.
+- `_volcano_svg_string(...)` — interactive SVG volcano (rasterised cloud +
+  vector significant points with `<title>` tooltips).
+
+**Outputs**
+- `DROPBOX_ML/interfaces/20260603_3d_interface_R2_assoc_ms.html` — the cockpit.
+- `DROPBOX_ML/interfaces/volcanoes/<hash>.svg` — cached per-(gene, experiment)
+  volcanoes (delete this folder to force a clean re-render after a data or
+  `xlim`/`size` change).
+
+---
+
+## 6. Building `data/srb_png/` — CDD Vault PNG export
 
 `MS_TargetML.ipynb`'s 3D prioritisation viz (cell 33) prefers
 pre-rendered structure thumbnails from `data/srb_png/<compound>.png`
@@ -282,7 +425,7 @@ new PNGs automatically on next render.
 
 ---
 
-## 6. Unit tests
+## 7. Unit tests
 
 The unit tests for the shared helpers (`Statistics_tools.check_ML_data`,
 `Rdkit_tools.write_filtered_enum_sdf`, …) live next to the modules they
@@ -298,7 +441,7 @@ etc.), create `MS_ML/tests/` and document them here.
 
 ---
 
-## How the four notebooks fit together
+## How the notebooks fit together
 
 ```
         ┌─────────────────────────────┐
@@ -308,14 +451,15 @@ etc.), create `MS_ML/tests/` and document them here.
                        ▼  (applied at load time)
         ┌─────────────────────────────┐
         │  MS_TargetML.ipynb          │   per-gene R² screen + 3D viz
-        │  (+ python/compute_R2_…)   │   over the full proteome
-        └──────────────┬──────────────┘   saves trained models to
-                       │                  output/ML/trained_models/
-                       ▼
-        ┌─────────────────────────────┐
-        │  MS_ML_Prioritization.ipynb │   score new libraries with the
-        │                             │   trained gene-models → SDF
-        └─────────────────────────────┘   to chemistry
+        │  (+ python/compute_R2_…)   │   over the full proteome →
+        └──────────────┬──────────────┘   GENE_SAR_OUT + trained models
+                       │
+            ┌──────────┴───────────┐
+            ▼                      ▼
+ ┌─────────────────────────┐  ┌─────────────────────────────┐
+ │ MS_ML_Prioritization    │  │  MS_Interface.ipynb         │  interactive FBX
+ │ score libraries → SDF   │  │  R²+assoc+MS-score browser  │  target cockpit
+ └─────────────────────────┘  └─────────────────────────────┘  (HTML + volcanoes)
 
         ┌─────────────────────────────┐   (orthogonal: same features,
         │  MS_exploratory.ipynb       │   different prediction target —
@@ -324,11 +468,12 @@ etc.), create `MS_ML/tests/` and document them here.
 ```
 
 Plate analysis is upstream of target ML (provides the drop list).
-Target ML produces the per-gene champion models and the prioritisation
-table; the prioritisation notebook consumes those models to score
-new compounds. Compound-level exploratory modelling is orthogonal —
-same underlying features, different prediction target (any-down vs
-target-specific logfc).
+Target ML produces the per-gene champion models, the prioritisation
+table, and the per-gene R² (`GENE_SAR_OUT`). Two notebooks consume that
+R²: `MS_ML_Prioritization` scores new compounds with the trained models,
+and `MS_Interface` joins it with the FBX MS/disease scores into an
+interactive 3D browser. Compound-level exploratory modelling is
+orthogonal — same underlying features, different prediction target.
 
 ## Related docs
 

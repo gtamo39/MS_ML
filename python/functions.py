@@ -466,7 +466,7 @@ def plot_activity_rate_by_tranche(MS, date_col='date', activity_col='activity',
 def plot_activity_composition_over_time(
         MS, date_col='date', activity_col='activity',
         cats=('Silent', 'Single (1)', 'Low (2-10)', 'Medium (11-25)', 'High (>25)'),
-        colors=('#d8cdbf', '#c9b79a', '#88a06a', '#d99a3a', '#b8412f'),
+        colors=None,
         silent_label='Silent', show_rate_line=True, dpi=150, ax=None):
     """
     100%-stacked area of MS activity-category composition across screening tranches
@@ -484,7 +484,9 @@ def plot_activity_composition_over_time(
     :param str activity_col: categorical activity column; auto-falls back to the
         first column containing 'activity'.
     :param cats: category order, BOTTOM → TOP of the stack.
-    :param colors: per-category fill colours (same length/order as ``cats``).
+    :param colors: per-category fill colours — a list (positional, same order as
+        ``cats``, recycled if shorter) OR a dict ``{category: colour}``. ``None``
+        (default) keeps the built-in earth-tone palette.
     :param str silent_label: inactive label (used for the activity-rate line).
     :param bool show_rate_line: overlay the non-silent activity-rate line.
     :param int dpi: figure resolution (only used when ``ax`` is None; default 150).
@@ -493,7 +495,15 @@ def plot_activity_composition_over_time(
         with an ``n`` column and one share column per category.
     """
     import matplotlib.pyplot as plt
-    cats = list(cats); colors = list(colors)
+    _DEFAULT_COLORS = ('#d8cdbf', '#c9b79a', '#88a06a', '#d99a3a', '#b8412f')
+    cats = list(cats)
+    if colors is None:
+        colors = list(_DEFAULT_COLORS)
+    elif isinstance(colors, dict):
+        colors = [colors.get(c, '#cccccc') for c in cats]      # map by category; grey fallback
+    else:
+        colors = list(colors)
+    colors = [colors[i % len(colors)] for i in range(len(cats))]   # match length / recycle
 
     df = MS.copy()
     if activity_col not in df.columns:
@@ -2798,6 +2808,656 @@ def plot_volcano(df, compound, gene,
     return agg
 
 
+# Coarse functional categories for colouring volcanoes "by function" instead of
+# by up/down direction. Priority-ordered: the FIRST category whose any keyword is
+# a substring of a gene's concatenated GO/Reactome term names wins (so specific
+# processes beat generic ones). Keywords match term_name from gene2term.parquet.
+CATEGORY_KEYWORDS = [
+    ('DNA replication',           ['dna replication', 'pre-replicative', 'replication fork',
+                                    'replication origin', 'origin of replication', 'dna-dependent dna']),
+    ('DNA repair / HR',           ['dna repair', 'homologous recombination', 'double-strand break',
+                                   'mismatch repair', 'excision repair', 'dna damage', 'brca', 'atr ']),
+    ('Cell cycle / mitosis',      ['cell cycle', 'mitotic', 'mitosis', 'chromosome segregation',
+                                   'spindle', 'cytokinesis', 'kinetochore', 'checkpoint']),
+    ('Chromatin / transcription', ['chromatin', 'histone', 'nucleosome', 'transcription',
+                                   'rna polymerase', 'methylation', 'demethyl', 'acetylation']),
+    ('RNA processing / splicing', ['splic', 'mrna processing', 'rna processing', 'spliceosom',
+                                   'rna export', 'mrna stability']),
+    ('Translation / ribosome',    ['translation', 'ribosom', 'trna', 'rrna']),
+    ('Proteostasis / UPR',        ['unfolded protein', 'proteasom', 'ubiquitin', 'protein folding',
+                                   'endoplasmic reticulum stress', 'erad', 'autophag', 'chaperone']),
+    ('Lipid / cholesterol',       ['lipid metabolic', 'lipid biosynthe', 'lipid catabolic',
+                                   'cholesterol', 'sterol', 'fatty acid', 'lipoprotein',
+                                   'ppar', 'triglyceride']),
+    ('Xenobiotic / oxidation',    ['cytochrome', 'xenobiotic metabolic', 'drug metab', 'p450',
+                                   'biological oxidation', 'phase i -', 'phase ii', 'glutathione']),
+    ('ECM / adhesion',            ['extracellular matrix', 'collagen', 'elastic fib', 'elastin',
+                                   'cell adhesion', 'cell-matrix', 'integrin', 'laminin',
+                                   'basement membrane']),
+    ('Cytoskeleton',              ['cytoskeleton', 'actin', 'microtubule', 'intermediate filament',
+                                   'tubulin']),
+    ('Transport / vesicle',       ['transmembrane transport', 'ion transport', 'vesicle',
+                                   'trafficking', 'endocytosis', 'exocytosis', 'slc-mediated',
+                                   'solute', 'golgi']),
+    ('Signaling',                 ['signal transduction', 'signaling pathway', 'signaling by',
+                                   'mapk cascade', 'kinase cascade']),
+    ('Immune / inflammation',     ['immune', 'interferon', 'inflammat', 'cytokine', 'antigen',
+                                   'complement', 'interleukin']),
+    ('Metabolism (other)',        ['metabolic process', 'biosynthetic process', 'catabolic process',
+                                   'tca cycle', 'glycolysis', 'oxidative phosphoryl', 'nucleotide']),
+]
+
+CATEGORY_COLORS = {
+    'DNA replication':           '#1f77b4',
+    'DNA repair / HR':           '#0b3d91',
+    'Cell cycle / mitosis':      '#17becf',
+    'Chromatin / transcription': '#9467bd',
+    'RNA processing / splicing': '#c5b0d5',
+    'Translation / ribosome':    '#8c564b',
+    'Proteostasis / UPR':        '#e377c2',
+    'Lipid / cholesterol':       '#bcbd22',
+    'Xenobiotic / oxidation':    '#ff7f0e',
+    'ECM / adhesion':            '#2ca02c',
+    'Cytoskeleton':              '#98df8a',
+    'Transport / vesicle':       '#7f7f7f',
+    'Signaling':                 '#d62728',
+    'Immune / inflammation':     '#e7969c',
+    'Metabolism (other)':        '#ffbb78',
+    'Other':                     '#cfcfcf',
+}
+
+
+def _term_category(term_name_lower, keywords):
+    """Category for a single term name (first keyword match by priority), or None."""
+    for cat, kws in keywords:
+        if any(k in term_name_lower for k in kws):
+            return cat
+    return None
+
+
+def categorize_genes(gene2term, genes=None, keywords=CATEGORY_KEYWORDS, default='Other'):
+    """Map each gene to ONE coarse functional category from its GO/Reactome
+    annotations, for colouring volcanoes / labelling proteins by function.
+
+    Assignment is **specificity-weighted consensus**, not first-keyword-wins:
+    every term is mapped to a category (via the priority-ordered ``keywords``
+    table), and each category accumulates a score of ``1/sqrt(term_size)`` over
+    the gene's terms (``term_size`` = #genes annotated, so specific terms count
+    far more than broad GO ancestors). The gene takes the highest-scoring
+    category. This way many supporting specific terms (RAD51's dozen HR/DSB-repair
+    terms) beat a single tiny incidental one (an actin term), and broad ancestors
+    ("DNA replication", "response to stimulus") barely contribute. Category
+    priority breaks ties; genes with no categorised term map to ``default``.
+
+    :param df gene2term: long table from build_cell_signature_annotations
+        (``output/cell_signature/gene2term.parquet``) with columns ``gene``,
+        ``term_id``, ``term_name``.
+    :param genes: optional iterable to restrict to (and guarantee a key for);
+        ``None`` categorises every gene present in ``gene2term``.
+    :return dict: ``{gene: category}``.
+    """
+    # term specificity = number of distinct genes annotated (smaller = more specific)
+    term_size = gene2term.groupby('term_id')['gene'].nunique()
+    g2t = gene2term
+    if genes is not None:
+        genes = set(genes)
+        g2t = g2t[g2t['gene'].isin(genes)]
+    prio = {cat: i for i, (cat, _) in enumerate(keywords)}
+
+    # map each unique term -> (category, size, priority); skip uncategorised terms
+    terms = g2t[['term_id', 'term_name']].drop_duplicates('term_id')
+    tcat = {}
+    for tid, tname in terms.itertuples(index=False):
+        c = _term_category(str(tname).lower(), keywords)
+        if c is not None:
+            tcat[tid] = (c, int(term_size.get(tid, 10 ** 9)), prio[c])
+
+    # per gene: specificity-weighted vote (sum 1/sqrt(size)); tie -> priority
+    import math
+    from collections import defaultdict
+    out = {}
+    cats_only = g2t[g2t['term_id'].isin(tcat)]
+    for gene, grp in cats_only.groupby('gene'):
+        scores = defaultdict(float)
+        for tid in grp['term_id'].values:
+            c, sz, _ = tcat[tid]
+            scores[c] += 1.0 / math.sqrt(sz)
+        out[gene] = max(scores, key=lambda c: (scores[c], -prio[c]))
+
+    pool = genes if genes is not None else set(g2t['gene'].unique())
+    for g in pool:
+        out.setdefault(g, default)
+    return out
+
+
+def gene_category_long(gene_category, collection='Function'):
+    """Reshape a ``{gene: category}`` map (from :func:`categorize_genes`) into a
+    ``gene2term``-shaped long frame so the coarse functional **categories** can
+    be fed to :func:`ora_enrichment` / :func:`gsea_preranked` as gene sets —
+    giving one enrichment score per function rather than per GO/Reactome term.
+
+    Pass the result with ``collections=('Function',)``; remember categories are
+    large sets, so relax the size caps (``max_term_size`` for ORA, ``max_size``
+    for GSEA). The ``'Other'`` bucket is kept so the background ``N`` stays the
+    full measured proteome — just ignore its row in the output.
+
+    :param dict gene_category: ``{gene: category}``.
+    :param str collection: value for the ``collection`` column.
+    :return df: columns ``gene``, ``collection``, ``term_id``, ``term_name``
+        (``term_id`` == ``term_name`` == the category).
+    """
+    items = list(gene_category.items())
+    cats = [c for _, c in items]
+    return pd.DataFrame({
+        'gene':       [g for g, _ in items],
+        'collection': collection,
+        'term_id':    cats,
+        'term_name':  cats,
+    })
+
+
+def _bh_fdr(pvals):
+    """Benjamini-Hochberg FDR (q-values) for a 1-D array of p-values."""
+    p = np.asarray(pvals, float)
+    m = p.size
+    order = np.argsort(p)
+    q = np.empty(m)
+    q[order] = (p[order] * m / np.arange(1, m + 1))
+    # enforce monotonicity from the largest p downward
+    q[order] = np.minimum.accumulate(q[order][::-1])[::-1]
+    return np.clip(q, 0, 1)
+
+
+def _term_members(gene2term, collections, universe):
+    """{(collection, term_id, term_name): frozenset(genes ∩ universe)} restricted
+    to ``collections`` and the gene ``universe`` (set)."""
+    g = gene2term[gene2term['collection'].isin(collections) & gene2term['gene'].isin(universe)]
+    out = {}
+    for key, sub in g.groupby(['collection', 'term_id', 'term_name'], sort=False):
+        out[key] = frozenset(sub['gene'])
+    return out
+
+
+def ora_enrichment(gene_set, background, gene2term, *,
+                   collections=('GO_BP', 'Reactome'),
+                   min_overlap=3, max_term_size=500, fdr=None, top_n=None):
+    """Over-representation analysis via the **hypergeometric test** (one-tailed
+    Fisher's exact): is each GO/Reactome term over-represented in ``gene_set``
+    vs ``background``?
+
+    Operates on a *thresholded* set (e.g. the significant-down genes of a
+    volcano). The background should be the **measured proteome** — using the
+    whole genome inflates membrane/secreted terms. Per collection the universe
+    ``N`` is the background genes carrying ≥1 annotation in that collection, and
+    ``n`` the gene_set genes within it; ``K``/``k`` are the term's hits in
+    background / gene_set. p = ``hypergeom.sf(k-1, N, K, n)``; BH-FDR is pooled
+    across all tested terms.
+
+    :param gene_set: iterable of query genes (one direction at a time).
+    :param background: iterable of measured genes (the universe).
+    :param df gene2term: long table (gene, collection, term_id, term_name).
+    :param collections: which annotation collections to test.
+    :param int min_overlap: drop terms with < this many query hits (k).
+    :param int max_term_size: drop terms broader than this (K) — generic noise.
+    :param float fdr: if given, keep only rows with q <= fdr.
+    :param int top_n: if given, return only the top_n by p-value.
+    :return df: columns collection, term_id, term_name, k, K, n, N, p, fdr,
+        overlap_genes — sorted by p-value.
+    """
+    from scipy.stats import hypergeom
+    bg = set(background)
+    gs = set(gene_set) & bg
+    rows = []
+    for coll in collections:
+        members = _term_members(gene2term, [coll], bg)
+        annot_bg = set().union(*members.values()) if members else set()
+        N = len(annot_bg)
+        n = len(gs & annot_bg)
+        if N == 0 or n == 0:
+            continue
+        for (c, tid, tname), genes in members.items():
+            K = len(genes)
+            if K > max_term_size:
+                continue
+            k = len(genes & gs)
+            if k < min_overlap:
+                continue
+            p = float(hypergeom.sf(k - 1, N, K, n))
+            rows.append((c, tid, tname, k, K, n, N, p, sorted(genes & gs)))
+    if not rows:
+        return pd.DataFrame(columns=['collection', 'term_id', 'term_name',
+                                     'k', 'K', 'n', 'N', 'p', 'fdr', 'overlap_genes'])
+    out = pd.DataFrame(rows, columns=['collection', 'term_id', 'term_name',
+                                      'k', 'K', 'n', 'N', 'p', 'overlap_genes'])
+    out['fdr'] = _bh_fdr(out['p'].values)
+    out = out.sort_values('p').reset_index(drop=True)
+    out = out[['collection', 'term_id', 'term_name', 'k', 'K', 'n', 'N', 'p', 'fdr', 'overlap_genes']]
+    if fdr is not None:
+        out = out[out['fdr'] <= fdr].reset_index(drop=True)
+    if top_n is not None:
+        out = out.head(top_n).reset_index(drop=True)
+    return out
+
+
+def _running_es(pos, w, N):
+    """Weighted GSEA running enrichment score. ``pos`` = ascending member
+    positions in the ranked list, ``w`` = |stat| weights (len N). Returns
+    (ES, peak_index)."""
+    k = pos.size
+    inc = np.zeros(N)
+    inc[pos] = w[pos]
+    s = inc.sum()
+    if s == 0:
+        return 0.0, 0
+    inc /= s
+    dec = np.full(N, 1.0 / (N - k))
+    dec[pos] = 0.0
+    run = np.cumsum(inc - dec)
+    peak = int(np.argmax(np.abs(run)))
+    return float(run[peak]), peak
+
+
+def _null_es_for_size(k, n_perm, w, rng):
+    """Vectorised null ES for random gene sets of size ``k`` against weights
+    ``w`` — the null depends only on size, so callers cache by ``k``."""
+    N = w.size
+    rand = rng.random((n_perm, N))
+    sel = np.argpartition(rand, k - 1, axis=1)[:, :k]          # n_perm random size-k sets
+    rows = np.repeat(np.arange(n_perm), k)
+    cols = sel.ravel()
+    inc = np.zeros((n_perm, N))
+    inc[rows, cols] = w[cols]
+    inc /= inc.sum(axis=1, keepdims=True)
+    dec = np.full((n_perm, N), 1.0 / (N - k))
+    dec[rows, cols] = 0.0
+    run = np.cumsum(inc - dec, axis=1)
+    idx = np.argmax(np.abs(run), axis=1)
+    return run[np.arange(n_perm), idx]
+
+
+def gsea_preranked(ranks, gene2term, *,
+                   collections=('GO_BP', 'Reactome'),
+                   min_size=10, max_size=300, n_perm=1000,
+                   weight=1.0, seed=0, fdr=None, top_n=None):
+    """**GSEA-preranked** (Subramanian 2005), threshold-free: rank *all* measured
+    genes by a signed statistic and test whether each term is concentrated at
+    the top (induced) or bottom (suppressed) of the ranking. Catches coordinated
+    subtle shifts (a whole complex nudged down) that no single gene clears the
+    significance cutoff for — the complement to :func:`ora_enrichment`.
+
+    Weighted running ES (``weight``=1). Significance from a **size-matched
+    permutation null** (random gene sets of equal size; the null depends only on
+    size, so it is computed once per size and reused). NES = ES / mean(|same-sign
+    null|); nominal p = fraction of same-sign null with |ES| ≥ |observed|;
+    BH-FDR across tested terms.
+
+    :param Series ranks: index = gene, value = signed statistic (e.g.
+        ``sign(logfc) * -log10(pvalue)``) over the measured proteome.
+    :param df gene2term: long table (gene, collection, term_id, term_name).
+    :param int min_size, max_size: term size bounds (genes present in ranking).
+    :param int n_perm: permutations for the null (1000 default).
+    :param float weight: ES weighting exponent on |stat| (GSEA default 1).
+    :param int seed: RNG seed (reproducible).
+    :param float fdr: if given, keep only rows with q <= fdr.
+    :param int top_n: if given, return only the top_n by |NES|.
+    :return df: collection, term_id, term_name, size, ES, NES, p, fdr,
+        direction ('up'/'down'), leading_edge — sorted by p then |NES|.
+    """
+    ranks = pd.Series(ranks).dropna().sort_values(ascending=False)
+    genes_sorted = list(ranks.index)
+    pos_of = {g: i for i, g in enumerate(genes_sorted)}
+    w = np.abs(ranks.values.astype(float)) ** weight
+    N = len(genes_sorted)
+    universe = set(genes_sorted)
+    members = _term_members(gene2term, collections, universe)
+
+    rng = np.random.default_rng(seed)
+    null_cache = {}
+    rows = []
+    for (coll, tid, tname), genes in members.items():
+        size = len(genes)
+        if size < min_size or size > max_size:
+            continue
+        pos = np.sort(np.fromiter((pos_of[g] for g in genes), dtype=int, count=size))
+        es, peak = _running_es(pos, w, N)
+        if size not in null_cache:
+            null_cache[size] = _null_es_for_size(size, n_perm, w, rng)
+        null = null_cache[size]
+        same = null[null > 0] if es >= 0 else null[null < 0]
+        if same.size == 0:
+            nes, p = np.nan, 1.0
+        else:
+            nes = es / np.abs(same).mean()
+            p = (np.sum(np.abs(same) >= abs(es)) + 1) / (same.size + 1)
+        # leading edge = members driving the peak
+        if es >= 0:
+            le = [genes_sorted[i] for i in pos if i <= peak]
+        else:
+            le = [genes_sorted[i] for i in pos if i >= peak]
+        rows.append((coll, tid, tname, size, es, nes, p,
+                     'up' if es >= 0 else 'down', le))
+    if not rows:
+        return pd.DataFrame(columns=['collection', 'term_id', 'term_name', 'size',
+                                     'ES', 'NES', 'p', 'fdr', 'direction', 'leading_edge'])
+    out = pd.DataFrame(rows, columns=['collection', 'term_id', 'term_name', 'size',
+                                      'ES', 'NES', 'p', 'direction', 'leading_edge'])
+    out['fdr'] = _bh_fdr(out['p'].values)
+    out = out.sort_values(['p', 'NES'], key=lambda s: s if s.name != 'NES' else -s.abs())
+    out = out.reset_index(drop=True)
+    out = out[['collection', 'term_id', 'term_name', 'size', 'ES', 'NES', 'p',
+               'fdr', 'direction', 'leading_edge']]
+    if fdr is not None:
+        out = out[out['fdr'] <= fdr].reset_index(drop=True)
+    if top_n is not None:
+        out = out.head(top_n).reset_index(drop=True)
+    return out
+
+
+def _function_enrich_one(cmpd, sub, g2cat, categories, *,
+                         gene_col, logfc_col, p_col, sig_col,
+                         n_perm, seed, min_overlap, run_ora, run_gsea):
+    """Per-compound function-level enrichment (module-level so joblib pickles it
+    cleanly). Collapses plate replicates per gene, then scores each functional
+    category with ORA (on the significant down/up sets) and GSEA-preranked
+    (signed -log10 p). Returns one row per category for this compound, or None."""
+    sub = sub.dropna(subset=[gene_col, logfc_col, p_col])
+    if sub.empty:
+        return None
+    a = (sub.groupby(gene_col)
+            .agg(logfc=(logfc_col, 'mean'), pvalue=(p_col, 'min'), sig=(sig_col, 'max'))
+            .reset_index())
+    bg = set(a[gene_col])
+    down = set(a.loc[(a['sig'] > 0) & (a['logfc'] < 0), gene_col])
+    up = set(a.loc[(a['sig'] > 0) & (a['logfc'] > 0), gene_col])
+    rec = {c: {'compound': cmpd, 'function': c, 'n_down': 0, 'n_up': 0,
+               'ora_down_fdr': np.nan, 'ora_up_fdr': np.nan, 'gsea_NES': np.nan,
+               'gsea_fdr': np.nan, 'gsea_direction': None, 'n_measured': len(bg)}
+           for c in categories}
+
+    g2c = dict(zip(g2cat['gene'], g2cat['term_name']))
+    for g in down:
+        c = g2c.get(g)
+        if c in rec:
+            rec[c]['n_down'] += 1
+    for g in up:
+        c = g2c.get(g)
+        if c in rec:
+            rec[c]['n_up'] += 1
+
+    if run_ora:
+        if down:
+            od = ora_enrichment(down, bg, g2cat, collections=('Function',),
+                                min_overlap=min_overlap, max_term_size=10 ** 9)
+            for _, r in od.iterrows():
+                if r['term_name'] in rec:
+                    rec[r['term_name']]['ora_down_fdr'] = r['fdr']
+        if up:
+            ou = ora_enrichment(up, bg, g2cat, collections=('Function',),
+                                min_overlap=min_overlap, max_term_size=10 ** 9)
+            for _, r in ou.iterrows():
+                if r['term_name'] in rec:
+                    rec[r['term_name']]['ora_up_fdr'] = r['fdr']
+    if run_gsea:
+        ranks = pd.Series((np.sign(a['logfc']) * -np.log10(a['pvalue'].clip(lower=1e-300))).values,
+                          index=a[gene_col])
+        gs = gsea_preranked(ranks, g2cat, collections=('Function',),
+                            min_size=5, max_size=10 ** 9, n_perm=n_perm, seed=seed)
+        for _, r in gs.iterrows():
+            if r['term_name'] in rec:
+                rec[r['term_name']]['gsea_NES'] = r['NES']
+                rec[r['term_name']]['gsea_fdr'] = r['fdr']
+                rec[r['term_name']]['gsea_direction'] = r['direction']
+    return pd.DataFrame(list(rec.values()))
+
+
+def function_enrichment_all(df_raw, gene_category, *,
+                            compound_col='compound', gene_col='genes',
+                            logfc_col='logfc', p_col='pvalue', sig_col='significant',
+                            n_perm=1000, n_jobs=8, run_ora=True, run_gsea=True,
+                            min_overlap=3, seed=0, drop_other=True, verbose=True):
+    """Per-compound enrichment of the coarse **functional categories**, for every
+    compound in ``df_raw`` — parallelised across compounds with joblib.
+
+    For each compound: collapse plate replicates per gene (mean logfc / min
+    pvalue / significant-if-any), then score every function with ORA
+    (hypergeometric on the significant down/up sets, measured proteome as
+    background) and GSEA-preranked (signed -log10 p, threshold-free). Both FDRs
+    are BH-corrected across the ~15 functions within each compound.
+
+    :param df df_raw: per-(compound, gene[, plate]) table with ``compound_col``,
+        ``gene_col``, ``logfc_col``, ``p_col``, ``sig_col``.
+    :param dict gene_category: ``{gene: function}`` from :func:`categorize_genes`.
+    :param int n_perm: GSEA permutations per compound (1000 default; 500 ~2x faster).
+    :param int n_jobs: parallel workers (joblib loky).
+    :param bool run_ora, run_gsea: toggle either test.
+    :param bool drop_other: drop the ``'Other'`` category rows from the output.
+    :return df: tidy ``compound × function`` table — columns ``compound``,
+        ``function``, ``n_down``, ``n_up``, ``ora_down_fdr``, ``ora_up_fdr``,
+        ``gsea_NES``, ``gsea_fdr``, ``gsea_direction``, ``n_measured``.
+    """
+    from joblib import Parallel, delayed
+    import contextlib
+    import joblib
+
+    g2cat = gene_category_long(gene_category)
+    categories = sorted(g2cat['term_name'].unique())
+    groups = [(c, g[[gene_col, logfc_col, p_col, sig_col]])
+              for c, g in df_raw[[compound_col, gene_col, logfc_col, p_col, sig_col]]
+              .groupby(compound_col)]
+
+    @contextlib.contextmanager
+    def _tqdm_joblib(pbar):
+        class _Cb(joblib.parallel.BatchCompletionCallBack):
+            def __call__(self, *a, **k):
+                pbar.update(n=self.batch_size)
+                return super().__call__(*a, **k)
+        old = joblib.parallel.BatchCompletionCallBack
+        joblib.parallel.BatchCompletionCallBack = _Cb
+        try:
+            yield pbar
+        finally:
+            joblib.parallel.BatchCompletionCallBack = old
+            pbar.close()
+
+    def _run():
+        return Parallel(n_jobs=n_jobs)(
+            delayed(_function_enrich_one)(
+                c, sub, g2cat, categories,
+                gene_col=gene_col, logfc_col=logfc_col, p_col=p_col, sig_col=sig_col,
+                n_perm=n_perm, seed=seed, min_overlap=min_overlap,
+                run_ora=run_ora, run_gsea=run_gsea)
+            for c, sub in groups)
+
+    if verbose:
+        with _tqdm_joblib(tqdm(total=len(groups), desc='function enrichment', unit='cmp')):
+            results = _run()
+    else:
+        results = _run()
+
+    out = pd.concat([r for r in results if r is not None], ignore_index=True)
+    if drop_other:
+        out = out[out['function'] != 'Other'].reset_index(drop=True)
+    return out
+
+
+def plot_function_enrichment(df, *, nes_col='gsea_NES', fdr_col='gsea_fdr',
+                             label_col='function', sig=0.05,
+                             show_counts=False, down_count_col='n_down',
+                             up_count_col='n_up',
+                             down_color='#1f77b4', up_color='#d62728',
+                             ns_color='#cfcfcf', ax=None, title=None,
+                             width=7, height=None):
+    """Diverging **lollipop** of per-function enrichment for ONE compound — a
+    readable replacement for the flat enrichment table.
+
+    Each function is a stem from 0 to its GSEA NES, sorted so the most
+    suppressed sit at the bottom and the most induced at the top. Colour encodes
+    direction (suppressed = ``down_color``, induced = ``up_color``); bars are
+    full-colour + dotted ``*`` when significant (``fdr_col < sig``) and faded
+    grey otherwise, so the eye goes straight to the real signal.
+
+    :param df df: one compound's rows from :func:`function_enrichment_all`
+        (or the ``func_enrich`` table) — needs ``label_col``, ``nes_col``,
+        ``fdr_col``.
+    :param float sig: FDR threshold for the "significant" styling.
+    :param bool show_counts: annotate each bar with ``n_down↓ n_up↑`` (the
+        significant-gene counts) just above the stem; bars with both zero are
+        left unlabelled to reduce clutter. Needs ``down_count_col`` /
+        ``up_count_col`` on ``df``.
+    :param Axes ax: draw into an existing Axes; new figure if ``None``.
+    :return Axes: the axis drawn into.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    has_counts = show_counts and {down_count_col, up_count_col}.issubset(df.columns)
+    keep = [label_col, nes_col, fdr_col] + ([down_count_col, up_count_col] if has_counts else [])
+    d = df[keep].dropna(subset=[nes_col]).copy()
+    d = d.sort_values(nes_col).reset_index(drop=True)
+    if ax is None:
+        _, ax = plt.subplots(figsize=(width, height or max(3.0, 0.4 * len(d))), dpi=110)
+
+    for yi, r in d.iterrows():
+        nes, fdr = r[nes_col], r[fdr_col]
+        signif = pd.notna(fdr) and fdr < sig
+        base = up_color if nes >= 0 else down_color
+        col = base if signif else ns_color
+        ax.plot([0, nes], [yi, yi], color=col, lw=2, alpha=0.9 if signif else 0.55, zorder=1)
+        ax.scatter([nes], [yi], s=95 if signif else 40, color=col,
+                   edgecolor='black' if signif else 'none', lw=0.8, zorder=2)
+        if signif:
+            ax.text(nes + (0.05 if nes >= 0 else -0.05), yi, '*', fontsize=14,
+                    fontweight='bold', va='center', ha='left' if nes >= 0 else 'right')
+        if has_counts:
+            nd = 0 if pd.isna(r[down_count_col]) else int(r[down_count_col])
+            nu = 0 if pd.isna(r[up_count_col]) else int(r[up_count_col])
+            if nd or nu:
+                ax.text(nes / 2, yi + 0.30, f'{nd}↓ {nu}↑', ha='center',
+                        va='bottom', fontsize=6.5, color='#333')
+
+    ax.axvline(0, color='#444', lw=0.8)
+    ax.set_yticks(range(len(d)))
+    ax.set_yticklabels(d[label_col])
+    ax.set_xlabel('GSEA NES   (← suppressed     induced →)')
+    m = max(abs(d[nes_col].min()), abs(d[nes_col].max())) * 1.18
+    ax.set_xlim(-m, m)
+    ax.grid(axis='x', ls=':', alpha=0.5)
+    ax.set_axisbelow(True)
+    ax.set_title(title or 'Per-function enrichment')
+    ax.legend(handles=[
+        Line2D([0], [0], marker='o', color='w', markerfacecolor=down_color,
+               markeredgecolor='black', markersize=8, label=f'suppressed (FDR<{sig:g})'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor=up_color,
+               markeredgecolor='black', markersize=8, label=f'induced (FDR<{sig:g})'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor=ns_color,
+               markersize=7, label='n.s.'),
+    ], loc='lower right', fontsize=8, frameon=False)
+    plt.tight_layout()
+    return ax
+
+
+def signature_matrix_from_enrichment(func_enrich_all, *, value_col='gsea_NES',
+                                     compound_col='compound', func_col='function',
+                                     fill=0.0):
+    """Pivot :func:`function_enrichment_all` output into a compound × function
+    **fingerprint matrix** — each compound a row, each functional category a
+    column, value = ``value_col`` (GSEA NES by default). This is the per-compound
+    "cell signature" used for similarity. Missing function/compound cells (e.g. a
+    function dropped for a small measured set) are filled with ``fill`` (0 =
+    neutral NES).
+
+    :param df func_enrich_all: tidy output of :func:`function_enrichment_all`.
+    :return df: index = compound, columns = function, values = NES.
+    """
+    M = func_enrich_all.pivot_table(index=compound_col, columns=func_col, values=value_col)
+    return M.fillna(fill)
+
+
+def compound_distance_matrix(features, *, metric='cosine', compound_col=None,
+                             exclude_self=True):
+    """Pairwise compound × compound **distance** matrix (smaller = more similar),
+    in the same DataFrame layout as ``Rdkit_tools.get_*_distance_matrix`` so it
+    feeds straight into ``Rdkit_tools.get_NN_from_dist_matrix(d, top=N)``.
+
+    Works on any per-compound feature matrix — the functional fingerprint from
+    :func:`signature_matrix_from_enrichment` (cosine on the 15-D NES vector =
+    "same cell signature"), or a gene-level logfc table (use ``metric='correlation'``
+    for a CMap-style connectivity distance).
+
+    ``cosine`` distance (``1 - cosine_similarity``) is the default: it compares
+    the *pattern* of up/down functions and is invariant to overall signature
+    magnitude, so a strong and a mild proliferation-arrest compound still score
+    as near neighbours.
+
+    :param features: either a DataFrame indexed by compound (feature columns
+        only), or one with a ``compound_col`` column + feature columns.
+    :param str metric: any ``sklearn.metrics.pairwise_distances`` metric
+        (``'cosine'``, ``'euclidean'``, ``'correlation'``, ...).
+    :param str compound_col: name of the compound-id column if ``features`` isn't
+        already indexed by compound; ``None`` -> use the index.
+    :param bool exclude_self: set the diagonal to NaN so a compound's own row is
+        dropped from nearest-neighbour queries (NaN sorts last in
+        ``get_NN_from_dist_matrix``).
+    :return df: square distance matrix, index = columns = compound ids.
+    """
+    from sklearn.metrics import pairwise_distances
+    if compound_col is not None and compound_col in getattr(features, 'columns', []):
+        idx = list(features[compound_col])
+        X = features.drop(columns=[compound_col]).to_numpy(dtype=float)
+    else:
+        idx = list(features.index)
+        X = features.to_numpy(dtype=float)
+    D = pairwise_distances(X, metric=metric)
+    if exclude_self:
+        np.fill_diagonal(D, np.nan)          # fill on the writable ndarray
+    return pd.DataFrame(D, index=idx, columns=idx)
+
+
+def per_class_report(y_true, y_pred, proba, classes, names=None, sep_width=82):
+    """One-vs-rest per-class metrics (Accuracy / F1 / ROC_auc / PR_auc / MCC) plus
+    a MACRO average, printed in the project's standard format::
+
+        > <label>:	 Accuracy: .., F1: .., ROC_auc: .., PR_auc: .., MCC: ..
+        ----
+        >> MACRO:	 Accuracy: .., F1: .., ROC_auc: .., PR_auc: .., MCC: ..
+
+    Each class is scored as a binary one-vs-rest problem. ``proba`` columns must
+    align to ``classes`` order (e.g. from ``cross_val_predict(method='predict_proba')``
+    or ``clf.predict_proba``). ``names`` optionally maps class -> display label.
+
+    :param y_true, y_pred: arrays of class labels.
+    :param proba: (n_samples, n_classes) probability matrix aligned to ``classes``.
+    :param classes: ordered class labels matching ``proba`` columns.
+    :param dict names: optional {class: display label}.
+    :return df: per-class + MACRO metrics table (also printed).
+    """
+    from sklearn.metrics import (accuracy_score, f1_score, roc_auc_score,
+                                 average_precision_score, matthews_corrcoef)
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    sep = '-' * sep_width
+    rows = []
+    for i, c in enumerate(classes):
+        yt = (y_true == c).astype(int)
+        yp = (y_pred == c).astype(int)
+        pc = proba[:, i]
+        a = accuracy_score(yt, yp)
+        f = f1_score(yt, yp, zero_division=0)
+        r = roc_auc_score(yt, pc) if 0 < yt.sum() < len(yt) else float('nan')
+        p = average_precision_score(yt, pc) if yt.sum() > 0 else float('nan')
+        m = matthews_corrcoef(yt, yp) if yt.sum() > 0 else float('nan')
+        lab = (names or {}).get(c, c)
+        print(f'> {lab}:\t Accuracy: {a:.2f}, F1: {f:.2f}, ROC_auc: {r:.2f}, PR_auc: {p:.2f}, MCC: {m:.2f}')
+        print(sep)
+        rows.append({'class': lab, 'Accuracy': a, 'F1': f, 'ROC_auc': r, 'PR_auc': p, 'MCC': m})
+    out = pd.DataFrame(rows)
+    macro = out[['Accuracy', 'F1', 'ROC_auc', 'PR_auc', 'MCC']].mean()
+    print(sep)
+    print(f">> MACRO:\t Accuracy: {macro['Accuracy']:.2f}, F1: {macro['F1']:.2f}, "
+          f"ROC_auc: {macro['ROC_auc']:.2f}, PR_auc: {macro['PR_auc']:.2f}, MCC: {macro['MCC']:.2f}")
+    return out
+
+
 def plot_volcano_significant(df, uniquecontrast, gene,
                              *,
                              key='uniquecontrast',
@@ -2807,6 +3467,7 @@ def plot_volcano_significant(df, uniquecontrast, gene,
                              figsize=(6, 6), dpi=100,
                              up_color='#008bfb', down_color='#ff0051',
                              ns_color='lightgrey',
+                             gene_category=None, category_colors=None,
                              ax=None, title=None):
     """
     Volcano for a single experiment (``uniquecontrast``), colouring ONLY the
@@ -2826,13 +3487,21 @@ def plot_volcano_significant(df, uniquecontrast, gene,
     :param df df: long table with ``key``, ``genes``, ``logfc``, ``pvalue``
         (optionally ``sig_col``). For the FBX data this is ``FBX_MEASURE``.
     :param str uniquecontrast: the experiment id to plot (value in ``key``).
-    :param str gene: gene symbol to ring/annotate; silently skipped if absent.
+    :param str gene: gene symbol to ring/annotate; ``None`` -> no highlight
+        (compound-level view); a symbol absent from the data is silently skipped.
     :param str key: column identifying the experiment (default ``'uniquecontrast'``).
     :param str sig_col: significance-flag column; threshold fallback if missing.
     :param float fc_thresh, p_thresh: thresholds for the dashed guides (and the
         significance fallback when ``sig_col`` is absent).
     :param float xmin, xmax: x-axis (logfc) limits.
-    :param str up_color, down_color, ns_color: dot colours.
+    :param str up_color, down_color, ns_color: dot colours (direction mode).
+    :param dict gene_category: optional ``{gene: category}`` map (e.g. from
+        :func:`categorize_genes`). When given, significant points are coloured by
+        functional *category* instead of red/blue up/down — direction is then
+        encoded by marker shape (``^`` up, ``v`` down) and the legend lists the
+        categories present (with counts). ``None`` -> classic up/down colouring.
+    :param dict category_colors: ``{category: hex}`` palette (default
+        ``CATEGORY_COLORS``); only used when ``gene_category`` is given.
     :param Axes ax: draw into an existing Axes; new figure if ``None``.
     :param str title: ``None`` -> default caption; ``''`` -> no title; else verbatim.
     :return df: per-gene aggregate (``genes``, ``logfc``, ``pvalue``,
@@ -2866,33 +3535,63 @@ def plot_volcano_significant(df, uniquecontrast, gene,
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    ax.scatter(agg.loc[ns,   'logfc'], agg.loc[ns,   'nlog10p'],
-               s=8,  c=ns_color,   edgecolor='none', alpha=0.5,
+    # non-significant background (both colouring modes)
+    ax.scatter(agg.loc[ns, 'logfc'], agg.loc[ns, 'nlog10p'],
+               s=8, c=ns_color, edgecolor='none', alpha=0.5,
                label=f'ns ({int(ns.sum())})')
-    ax.scatter(agg.loc[up,   'logfc'], agg.loc[up,   'nlog10p'],
-               s=12, c=up_color,   edgecolor='none', alpha=0.9,
-               label=f'sig up ({int(up.sum())})')
-    ax.scatter(agg.loc[down, 'logfc'], agg.loc[down, 'nlog10p'],
-               s=12, c=down_color, edgecolor='none', alpha=0.9,
-               label=f'sig down ({int(down.sum())})')
+
+    legend_handles = None
+    if gene_category is not None:
+        # colour-by-function: one colour per category, ^ = up / v = down
+        from matplotlib.lines import Line2D
+        cmap = category_colors or CATEGORY_COLORS
+        cats = agg['genes'].map(lambda g: gene_category.get(g, 'Other'))
+        # categories present among significant points, most-frequent first
+        present = cats[sig].value_counts()
+        for category in present.index:
+            col = cmap.get(category, cmap.get('Other', '#cfcfcf'))
+            cm = sig & (cats == category)
+            ax.scatter(agg.loc[cm & (agg['logfc'] > 0), 'logfc'],
+                       agg.loc[cm & (agg['logfc'] > 0), 'nlog10p'],
+                       s=22, marker='^', c=col, edgecolor='none', alpha=0.9)
+            ax.scatter(agg.loc[cm & (agg['logfc'] < 0), 'logfc'],
+                       agg.loc[cm & (agg['logfc'] < 0), 'nlog10p'],
+                       s=22, marker='v', c=col, edgecolor='none', alpha=0.9)
+        legend_handles = [Line2D([0], [0], marker='o', linestyle='', markersize=6,
+                                 color=cmap.get(c, '#cfcfcf'), label=f'{c} ({n})')
+                          for c, n in present.items()]
+        legend_handles += [
+            Line2D([0], [0], marker='^', linestyle='', markersize=6,
+                   color='#444', label='▲ up-modulated'),
+            Line2D([0], [0], marker='v', linestyle='', markersize=6,
+                   color='#444', label='▼ down-modulated'),
+        ]
+    else:
+        ax.scatter(agg.loc[up, 'logfc'], agg.loc[up, 'nlog10p'],
+                   s=12, c=up_color, edgecolor='none', alpha=0.9,
+                   label=f'sig up ({int(up.sum())})')
+        ax.scatter(agg.loc[down, 'logfc'], agg.loc[down, 'nlog10p'],
+                   s=12, c=down_color, edgecolor='none', alpha=0.9,
+                   label=f'sig down ({int(down.sum())})')
 
     # threshold guides
     ax.axhline(-np.log10(p_thresh), ls='--', lw=0.7, c='#888')
     ax.axvline(+fc_thresh,          ls='--', lw=0.7, c='#888')
     ax.axvline(-fc_thresh,          ls='--', lw=0.7, c='#888')
 
-    # highlight target gene
-    tg = agg[agg['genes'] == gene]
-    if tg.empty:
-        print(f'> {gene} not measured in {uniquecontrast}')
-    else:
-        ax.scatter(tg['logfc'], tg['nlog10p'],
-                   s=70, facecolor='none', edgecolor='black', lw=1.5, zorder=5)
-        ax.annotate(gene,
-                    xy=(tg['logfc'].iat[0], tg['nlog10p'].iat[0]),
-                    xytext=(8, 6), textcoords='offset points',
-                    fontsize=11, fontweight='bold',
-                    arrowprops=dict(arrowstyle='-', lw=0.7))
+    # highlight target gene (gene=None -> no highlight, e.g. compound-level view)
+    if gene is not None:
+        tg = agg[agg['genes'] == gene]
+        if tg.empty:
+            print(f'> {gene} not measured in {uniquecontrast}')
+        else:
+            ax.scatter(tg['logfc'], tg['nlog10p'],
+                       s=70, facecolor='none', edgecolor='black', lw=1.5, zorder=5)
+            ax.annotate(gene,
+                        xy=(tg['logfc'].iat[0], tg['nlog10p'].iat[0]),
+                        xytext=(8, 6), textcoords='offset points',
+                        fontsize=11, fontweight='bold',
+                        arrowprops=dict(arrowstyle='-', lw=0.7))
 
     ax.set_xlim(xmin, xmax)
     ax.set_xlabel('logfc')
@@ -2900,7 +3599,12 @@ def plot_volcano_significant(df, uniquecontrast, gene,
     if title is None:
         title = f'{uniquecontrast}  ({len(agg):,} genes, {int(sig.sum())} significant)'
     ax.set_title(title)
-    ax.legend(loc='best', fontsize=8, frameon=False)
+    if legend_handles is not None:
+        ax.legend(handles=legend_handles, loc='upper left',
+                  bbox_to_anchor=(1.01, 1.0), fontsize=7, frameon=False,
+                  title='function', title_fontsize=8)
+    else:
+        ax.legend(loc='best', fontsize=8, frameon=False)
     plt.tight_layout()
     return agg
 

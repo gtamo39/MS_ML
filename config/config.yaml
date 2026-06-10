@@ -42,6 +42,9 @@ FEATURES_TYPE: prevalence
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
 CHEMLIB_OVERWRITE: false
+DFRAW_OVERWRITE: true
+DFRAW_PATH: output/MS/df_raw.csv
 
 # disease association research:
 RESEARCH_161_T_20260604: /mnt/c/Users/gtamo/Desktop/GT/disease_association/20260604_degradation_research.json
+FUNC_ENRICH_PATH: output/cell_signature/compound_function_enrichment.parquet
