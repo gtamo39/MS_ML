@@ -898,11 +898,20 @@ _INTERFACE_INJECT = '''
                   font: 11px sans-serif; color: #333; max-height: 80vh;
                   overflow-y: auto; display: none; user-select: none; }
   #filter-panel .fp-group + .fp-group { margin-top: 8px; }
-  #filter-panel .pf-head { font-weight: 700; padding-bottom: 4px;
+  #filter-panel .pf-head { font-weight: 700; padding-bottom: 4px; cursor: pointer;
                            border-bottom: 1px solid #eee; margin-bottom: 4px; }
   #filter-panel .pf-head span { color: #1D3557; cursor: pointer; font-weight: 400;
                                 font-size: 10px; }
   #filter-panel .pf-head span:hover { text-decoration: underline; }
+  /* collapsible caret + collapsed state */
+  #filter-panel .fp-caret { display: inline-block; width: 10px; color: #1D3557;
+                            transition: transform .12s; }
+  #filter-panel .fp-group.collapsed .fp-caret { transform: rotate(-90deg); }
+  #filter-panel .fp-group.collapsed .fp-boxes { display: none; }
+  /* plate list as two columns to keep the panel short */
+  #filter-panel .fp-boxes.pf-2col { display: grid;
+                                    grid-template-columns: repeat(2, max-content);
+                                    column-gap: 14px; }
   #filter-panel label { display: block; padding: 1px 0; cursor: pointer; white-space: nowrap; }
   #filter-panel input { margin-right: 5px; vertical-align: middle; }
   #hover-patents {
@@ -993,13 +1002,17 @@ _INTERFACE_INJECT = '''
   #range-panel .rp-reset:hover { text-decoration: underline; }
 </style>
 <div id="filter-panel">
-  <div class="fp-group" id="plate-group">
-    <div class="pf-head">Plates <span id="pf-all">all</span> / <span id="pf-none">none</span></div>
-    <div id="pf-boxes"></div>
+  <div class="fp-group collapsed" id="plate-group">
+    <div class="pf-head"><span class="fp-caret">&#9662;</span>Plates <span id="pf-all">all</span> / <span id="pf-none">none</span></div>
+    <div id="pf-boxes" class="fp-boxes pf-2col"></div>
   </div>
   <div class="fp-group" id="activity-group">
-    <div class="pf-head">Activity <span id="af-all">all</span> / <span id="af-none">none</span></div>
-    <div id="af-boxes"></div>
+    <div class="pf-head"><span class="fp-caret">&#9662;</span>Activity <span id="af-all">all</span> / <span id="af-none">none</span></div>
+    <div id="af-boxes" class="fp-boxes"></div>
+  </div>
+  <div class="fp-group" id="compound-group" style="display:none">
+    <div class="pf-head"><span class="fp-caret">&#9662;</span>Compound</div>
+    <div id="cf-boxes" class="fp-boxes"><label><input type="checkbox" id="control-toggle" checked> Controls</label></div>
   </div>
 </div>
 <div id="hover-img">
@@ -1069,8 +1082,20 @@ _INTERFACE_INJECT = '''
     var ticked = {};
     plates.forEach(function(p) { ticked[p] = true; });
     var activities = window.__ACTIVITIES__ || [];
+    // Optional focus set: if __ACTIVITY_DEFAULTS__ is given, only those levels
+    // start ticked (others off) so the view opens focused on e.g. Low + Single.
+    var actDefaults = window.__ACTIVITY_DEFAULTS__ || null;
     var tickedAct = {};
-    activities.forEach(function(a) { tickedAct[a] = true; });
+    activities.forEach(function(a) {
+      tickedAct[a] = actDefaults ? (actDefaults.indexOf(a) !== -1) : true;
+    });
+    // Control-compound filter: a single tickbox in the Activity panel. When OFF,
+    // every entry whose compound id is a control is hidden everywhere — panel list,
+    // volcanoes, and gene greying — exactly like an activity level being unticked.
+    var controlCompounds = {};
+    (window.__CONTROL_COMPOUNDS__ || []).forEach(function(c) { controlCompounds[c] = true; });
+    var controlOn = (window.__CONTROL_DEFAULT_ON__ !== false);  // default state of the tickbox
+    function cmpAllowed(t) { return controlOn || !controlCompounds[t[0]]; }
     var gd = document.querySelector(".plotly-graph-div") || document.querySelector(".js-plotly-plot");
     if (!gd) return;
 
@@ -1104,6 +1129,7 @@ _INTERFACE_INJECT = '''
       for (var i = 0; i < arr.length; i++) {
         var t = arr[i];
         if (!t || t[0] === "__META__") continue;
+        if (!cmpAllowed(t)) continue;
         if (Array.isArray(t[3])) {
           for (var j = 0; j < t[3].length; j++) {
             var pl = t[3][j];
@@ -1130,6 +1156,7 @@ _INTERFACE_INJECT = '''
       });
     }
     function entryVisible(t) {
+      if (!cmpAllowed(t)) return false;
       if (isPaged(t)) return visPlates(t).length > 0;
       return true;
     }
@@ -1221,8 +1248,11 @@ _INTERFACE_INJECT = '''
       var html = "";
       for (var i = 0; i < slice.length; i++) {
         var t = slice[i].t, eidx = slice[i].idx;
+        var _tm = window.__THUMB_MODE__ || "b64", _td = window.__THUMB_DIR__ || "srb_png";
         var img = t[1]
-          ? '<img src="data:image/png;base64,' + t[1] + '" draggable="false"/>'
+          ? (_tm === "path"
+               ? '<img loading="lazy" src="' + _td + '/' + t[1] + '.png" draggable="false"/>'
+               : '<img src="data:image/png;base64,' + t[1] + '" draggable="false"/>')
           : '<div class="noimg">(no structure)</div>';
         var lf, note;
         if (isPaged(t)) {
@@ -1315,14 +1345,20 @@ _INTERFACE_INJECT = '''
     // base64 blob (embedded mode), per window.__VOLCANO_MODE__. loading="lazy" so
     // the browser only fetches each PNG when its panel is actually shown.
     var VMODE = window.__VOLCANO_MODE__ || "b64";
+    var VBASE = window.__VOLCANO_BASE__ || "";   // shared dir prefix, factored out of each row
     function vimg(v) {
       // 'svg' -> interactive <object> (native <title> tooltips on significant
       // points); 'path' -> external PNG <img>; 'b64' -> inline PNG <img>.
+      // External modes store only the filename; prepend the shared base here.
       if (VMODE === "svg") {
-        return '<object class="vobj" type="image/svg+xml" data="' + v + '"></object>';
+        var d = VBASE ? VBASE + "/" + v : v;
+        return '<object class="vobj" type="image/svg+xml" data="' + d + '"></object>';
       }
-      var src = (VMODE === "path") ? v : ("data:image/png;base64," + v);
-      return '<img loading="lazy" src="' + src + '"/>';
+      if (VMODE === "path") {
+        var p = VBASE ? VBASE + "/" + v : v;
+        return '<img loading="lazy" src="' + p + '"/>';
+      }
+      return '<img loading="lazy" src="' + ("data:image/png;base64," + v) + '"/>';
     }
     function buildVolcanoHtml(cell) {
       var idx = parseInt(cell.getAttribute("data-eidx"), 10);
@@ -1424,7 +1460,8 @@ _INTERFACE_INJECT = '''
       }
       var html = "";
       items.forEach(function(v) {
-        html += '<label><input type="checkbox" value="' + v + '" checked>' + v + '</label>';
+        html += '<label><input type="checkbox" value="' + v + '"'
+              + (tickedMap[v] ? ' checked' : '') + '>' + v + '</label>';
       });
       boxesEl.innerHTML = html;
       boxesEl.addEventListener("change", function(e) {
@@ -1442,13 +1479,33 @@ _INTERFACE_INJECT = '''
         recolor3d();
         if (pinned) renderPage();
       }
-      document.getElementById(allId).addEventListener("click", function() { setAll(true); });
-      document.getElementById(noneId).addEventListener("click", function() { setAll(false); });
+      document.getElementById(allId).addEventListener("click", function(e) { e.stopPropagation(); setAll(true); });
+      document.getElementById(noneId).addEventListener("click", function(e) { e.stopPropagation(); setAll(false); });
       return true;
     }
     var hasPlateG = buildGroup(plates, ticked, pfBoxes, "pf-all", "pf-none");
     var hasActG   = buildGroup(activities, tickedAct, afBoxes, "af-all", "af-none");
+    // "Compound" group with a "Controls" tickbox: shown only if control compounds
+    // were provided. Unticking removes control compounds from every gene (panel,
+    // volcanoes, gene greying). Its own collapsible group, like Plates / Activity.
+    var _cg = document.getElementById("compound-group");
+    var _ctb = document.getElementById("control-toggle");
+    if (_cg && _ctb && Object.keys(controlCompounds).length) {
+      _cg.style.display = "";
+      _ctb.checked = controlOn;   // reflect the configured default (may start unticked)
+      _ctb.addEventListener("change", function() {
+        controlOn = _ctb.checked;
+        page = 0;
+        recolor3d();              // re-grey genes whose only compounds are controls
+        if (pinned) renderPage();
+      });
+    }
     if (hasPlateG || hasActG) pf.style.display = "block";
+    // clicking a group header (not the all/none spans) collapses/expands its boxes
+    var _heads = document.querySelectorAll("#filter-panel .pf-head");
+    for (var _h = 0; _h < _heads.length; _h++) {
+      _heads[_h].addEventListener("click", function() { this.parentNode.classList.toggle("collapsed"); });
+    }
 
     // --- range sliders (R² / association / MS score) ---
     // Each axis has a dual handle (lo/hi). On change we slice every colour trace
@@ -1511,10 +1568,9 @@ _INTERFACE_INJECT = '''
           }
           masks[ti] = m;
         });
-        // Mutate the trace data directly, then force a full redraw. Plotly.restyle
-        // of x/y/z on a gl3d (WebGL) scatter3d updates the data but does NOT
-        // reliably repaint the 3D scene — Plotly.redraw() does. In-range genes
-        // always keep their gene-name label.
+        // Mutate the trace data directly, then force a full redraw (Plotly.restyle of
+        // x/y/z on a gl3d scatter3d updates the data but doesn't reliably repaint the
+        // 3D scene — Plotly.redraw() does).
         R.areaTraces.forEach(function(ti) {
           var o = orig[ti], m = masks[ti]; if (!o || !m || !gd.data[ti]) return;
           var fx = [], fy = [], fz = [], ft = [], fcd = [], fhov = [];
@@ -1526,7 +1582,23 @@ _INTERFACE_INJECT = '''
           tr.x = fx; tr.y = fy; tr.z = fz; tr.text = ft; tr.customdata = fcd;
           tr.hovertext = fhov;   // keep the tooltip aligned with the filtered points
         });
+        // Gene-name labels are drawn as scene.annotations (constant-size SVG overlays),
+        // NOT scatter3d 'text': gl3d text is depth-scaled by the GPU (far / low-MS genes
+        // get tiny labels) and no projection fixes it; annotations are always the same
+        // pixel size and plotly repositions them on rotate/zoom. Shown only while the
+        // in-range set is small enough to read (<= labelMax); names are always on hover.
+        var anns = [];
+        if (R.labelMax === undefined || total <= R.labelMax) {
+          R.areaTraces.forEach(function(ti) {
+            var o = orig[ti], m = masks[ti]; if (!o || !m) return;
+            for (var k = 0; k < m.length; k++) if (m[k]) {
+              anns.push({x: o.x[k], y: o.y[k], z: o.z[k], text: o.text[k],
+                         showarrow: false, yshift: 9, font: {size: 11, color: "#000"}});
+            }
+          });
+        }
         Plotly.redraw(gd);
+        Plotly.relayout(gd, {"scene.annotations": anns});
         document.getElementById("rp-count").textContent = total + " in range";
       }
       recolor3d = applyRanges;   // let the Plate/Activity checkboxes re-colour too
@@ -1963,7 +2035,11 @@ def plot_target_3d(
     # 5) optional standalone HTML with on-hover structure thumbnails
     if html_path:
         os.makedirs(os.path.dirname(html_path), exist_ok=True)
-        fig.write_html(html_path, include_plotlyjs='cdn')
+        # 'directory' writes plotly.py's BUNDLED (offline) plotly.min.js next to the
+        # HTML and references it relatively — no CDN fetch on every open (measured the
+        # dominant real-world load cost) and fully offline. Keep plotly.min.js
+        # alongside the HTML, like the _data.js / volcanoes_px / srb_png sidecars.
+        fig.write_html(html_path, include_plotlyjs='directory')
 
         # Pre-build a per-gene patents-HTML lookup. Injected as a global JS
         # dict so the panel JS can render the table on hover/click without
@@ -2017,6 +2093,7 @@ def plot_3d_interface(
     volcano_key='uniquecontrast',
     page_size=5,
     png_dir='data/srb_png',
+    thumb_external=False,
     df_raw=None,
     volcano_size_px=350,
     volcano_xlim=(-5.0, 5.0),
@@ -2031,7 +2108,10 @@ def plot_3d_interface(
     title='SAR predictability × disease association × MS score',
     range_sliders=False,
     range_defaults=None,
+    activity_defaults=None,
     control_genes=(),
+    control_compounds=(),
+    control_default_on=True,   # control-compound tickbox starts checked (controls shown)
     gene_research=None,
     volcano_significant=False,
     volcano_dir=None,
@@ -2203,10 +2283,51 @@ def plot_3d_interface(
     _vsrc = None   # frame the volcano pass slices by its 'compound' column
     all_plates = []      # ordered unique plate labels for the client-side filter checkboxes
     all_activities = []  # ordered activity levels (nr_down buckets) for the activity filter
+    _thumb_ext = False   # thumbnail path-mode flag (set in the have_compounds block)
+    _thumb_rel = 'srb_png'
+    # External volcanoes share one long directory prefix; factor it into a single
+    # __VOLCANO_BASE__ and store only the per-row filename in the compound blob
+    # (prefix × 23k rows was ~2 MB). '' ⇒ embedded mode, JS prepends nothing.
+    _volcano_base = ''
     if have_compounds:
         _stats = {'png': 0, 'rdkit': 0, 'miss': 0}
 
+        # thumbnail mode: 'path' references PNGs copied next to the HTML (lazy <img>,
+        # keeps the page tiny); 'b64' inlines them (legacy, FBX). External needs png_dir
+        # + html_path. Used compound PNGs are copied to <html_dir>/srb_png/ on demand.
+        import shutil
+        _thumb_ext = bool(thumb_external) and bool(png_dir) and bool(html_path)
+        _thumb_rel = 'srb_png'
+        _thumb_copied = set()
+        if _thumb_ext:
+            _thumb_out = os.path.join(os.path.dirname(os.path.abspath(html_path)), _thumb_rel)
+            os.makedirs(_thumb_out, exist_ok=True)
+
         def _compound_b64(compound, smi, size=(170, 110)):
+            # PATH mode -> copy the compound PNG next to the HTML, return the compound id
+            # (the client builds <img src="srb_png/<id>.png">); '' if no image available.
+            if _thumb_ext:
+                if isinstance(compound, str) and compound and png_dir:
+                    p = os.path.join(png_dir, f'{compound}.png')
+                    if os.path.isfile(p):
+                        if compound not in _thumb_copied:
+                            dst = os.path.join(_thumb_out, f'{compound}.png')
+                            if not os.path.exists(dst):
+                                shutil.copyfile(p, dst)
+                            _thumb_copied.add(compound)
+                        _stats['png'] += 1
+                        return compound
+                    if isinstance(smi, str) and smi:        # render+cache to the thumb dir
+                        m = Chem.MolFromSmiles(smi)
+                        if m is not None:
+                            dst = os.path.join(_thumb_out, f'{compound}.png')
+                            if not os.path.exists(dst):
+                                Draw.MolToImage(m, size=size).save(dst, format='PNG')
+                            _stats['rdkit'] += 1
+                            return compound
+                _stats['miss'] += 1
+                return ''
+            # B64 mode (legacy): inline the PNG / rdkit render as base64
             if isinstance(compound, str) and compound and png_dir:
                 p = os.path.join(png_dir, f'{compound}.png')
                 if os.path.isfile(p):
@@ -2293,7 +2414,10 @@ def plot_3d_interface(
             # plates; the panel JS filters/stacks them per the plate checkboxes.
             plate_aware = 'plate' in compounds_df.columns
             if volcano_source is not None:
-                _vsrc = (volcano_source.rename(columns={volcano_key: 'compound'})
+                # drop any pre-existing 'compound' so renaming volcano_key -> 'compound'
+                # can't create a duplicate column (volcano_source may already carry compound)
+                _vsrc = (volcano_source.drop(columns=['compound'], errors='ignore')
+                         .rename(columns={volcano_key: 'compound'})
                          if volcano_key != 'compound' else volcano_source)
             cdf = compounds_df[compounds_df['gene'].isin(set(highlighted['gene']))].copy()
             if plate_aware:
@@ -2313,7 +2437,8 @@ def plot_3d_interface(
                 cdf['_best'] = cdf.groupby(['gene', 'compound'])['logfc'].transform('min')
                 cdf = cdf.sort_values(['gene', '_best', 'compound', 'logfc'],
                                       ascending=True)
-                for gene, gdf in cdf.groupby('gene', sort=False):
+                for gene, gdf in tqdm(cdf.groupby('gene', sort=False), total=cdf['gene'].nunique(),
+                                      desc='compound panels', unit='gene', mininterval=0.5):
                     entries = [['__META__', '', _meta_str(gene), '', '', '']]
                     for compound, cg in gdf.groupby('compound', sort=False):
                         lab = str(compound)
@@ -2346,7 +2471,8 @@ def plot_3d_interface(
             else:
                 # one entry per (gene, compound), single volcano, no plate filter
                 cdf = cdf.sort_values(['gene', 'logfc'], ascending=[True, True])
-                for gene, grp in cdf.groupby('gene', sort=False):
+                for gene, grp in tqdm(cdf.groupby('gene', sort=False), total=cdf['gene'].nunique(),
+                                      desc='compound panels', unit='gene', mininterval=0.5):
                     entries = [['__META__', '', _meta_str(gene), '', '', '']]
                     for _, r in grp.iterrows():
                         lab = str(r['compound']) if pd.notna(r['compound']) else ''
@@ -2428,6 +2554,7 @@ def plot_3d_interface(
                 os.makedirs(volcano_dir, exist_ok=True)
                 _rel = os.path.relpath(
                     volcano_dir, os.path.dirname(os.path.abspath(html_path))).replace(os.sep, '/')
+                _volcano_base = _rel   # emitted once; rows store only the filename
 
                 def _vfname(g, vk):
                     key = f'{g}|{vk}|{volcano_xlim[0]}|{volcano_xlim[1]}|{volcano_size_px}|{_ext}'
@@ -2438,7 +2565,7 @@ def plot_3d_interface(
                 for (g, vk, ei, pi) in tasks:
                     fn_ = _vfname(g, vk)
                     if os.path.exists(os.path.join(volcano_dir, fn_)):
-                        _set_volcano(g, ei, pi, _rel + '/' + fn_)
+                        _set_volcano(g, ei, pi, fn_)   # base prepended client-side
                     else:
                         render.append((g, vk, ei, pi, fn_))
                 n_cached = len(tasks) - len(render)
@@ -2459,7 +2586,7 @@ def plot_3d_interface(
                     with open(os.path.join(volcano_dir, fn_), mode_,
                               **({'encoding': 'utf-8'} if _sig else {})) as _fh:
                         _fh.write(data_)
-                    _set_volcano(g, ei, pi, _rel + '/' + fn_)
+                    _set_volcano(g, ei, pi, fn_)   # base prepended client-side
                 elif _sig:
                     _set_volcano(g, ei, pi, 'data:image/svg+xml;base64,'
                                  + base64.b64encode(content.encode()).decode())
@@ -2579,9 +2706,17 @@ def plot_3d_interface(
     area_trace_indices = []  # trace indices that the sliders restyle (colour traces)
 
     def _add_colour_trace(grp, name, color, symbol='circle', size=6):
+        # Rendering a gene-name text label for every point is the dominant cost in a
+        # gl3d scatter (thousands of 3D text sprites can take tens of seconds to lay
+        # out at the initial Plotly.newPlot). When the range sliders are present, start
+        # markers-only (fast paint); applyRanges() re-enables 'markers+text' for the
+        # in-range subset only when it's small enough to be readable (<= labelMax).
+        # The label data/styling is still emitted so the JS can switch text on with no
+        # re-layout of the data. Without sliders, keep the original always-on labels.
+        _init_mode = 'markers' if range_sliders else 'markers+text'
         trace_kw = dict(
             x=grp[x_col], y=grp[y_col], z=grp['_zplot'],
-            mode='markers+text',
+            mode=_init_mode,
             marker=dict(size=size, color=color, symbol=symbol, opacity=0.95,
                         line=dict(color='#333', width=1)),
             text=grp['gene'], textposition='top center',
@@ -2649,7 +2784,6 @@ def plot_3d_interface(
             'y': _axis_cfg(yv, y_label),
             'z': _axis_cfg(zv, z_label),
             'areaTraces': area_trace_indices,
-            'labelMax': max(70, target + 10),
         }
         # Per-axis default lower-handle overrides, e.g. {'y': 0.35} to start the
         # association handle at 0.35 (clamped to the axis range).
@@ -2657,8 +2791,17 @@ def plot_3d_interface(
             if _ax in ranges_cfg:
                 ranges_cfg[_ax]['lo'] = float(np.clip(_lo, ranges_cfg[_ax]['min'],
                                                       ranges_cfg[_ax]['max']))
-        print(f'  [range_sliders] default box ≈ {_count(_p)} genes '
-              f'(target {target}); drag any handle to widen/narrow')
+        # labelMax: gene-name labels render only while the in-range set is small enough
+        # to stay fast. Base it on the DEFAULT (focus) box — computed from the final lo
+        # handles AFTER range_defaults — so the initial view IS labelled; cap at 500 so
+        # sliding out toward the whole genome can't resurrect the slow all-labels render
+        # (drawing ~4,600 3D text sprites was the ~30 s cost).
+        _lx, _ly, _lz = ranges_cfg['x']['lo'], ranges_cfg['y']['lo'], ranges_cfg['z']['lo']
+        _focus_n = int(((xv >= _lx) & (yv >= _ly) & (zv >= _lz)).sum())
+        ranges_cfg['labelMax'] = min(max(_focus_n + 20, 70), 500)
+        print(f'  [range_sliders] default box ≈ {_focus_n} genes; '
+              f'gene labels shown while ≤ {ranges_cfg["labelMax"]} in range '
+              f'(drag handles to widen/narrow)')
 
     fig.update_layout(
         height=height, width=width, title=title,
@@ -2678,34 +2821,86 @@ def plot_3d_interface(
     # 5) optional standalone HTML with on-hover structure thumbnails
     if html_path:
         os.makedirs(os.path.dirname(html_path), exist_ok=True)
-        fig.write_html(html_path, include_plotlyjs='cdn')
+        # 'directory' writes plotly.py's BUNDLED (offline) plotly.min.js next to the
+        # HTML and references it relatively — no CDN fetch on every open (measured the
+        # dominant real-world load cost) and fully offline. Keep plotly.min.js
+        # alongside the HTML, like the _data.js / volcanoes_px / srb_png sidecars.
+        fig.write_html(html_path, include_plotlyjs='directory')
         gene_patents_map = _build_gene_patents_html_map(
             gene_patents_df, gene_patents_top_n, depmap_url_template)
         import json as _json
-        inject_data = (
-            '<script>window.__GENE_COMPOUNDS__ = '
-            + _json.dumps(custom if have_compounds else {}) + ';\n'
-            'window.__GENE_PATENTS__ = '
-            + _json.dumps(gene_patents_map) + ';\n'
+        # Emit large data via JSON.parse("...") not as JS object literals: the engine
+        # scans a string literal cheaply and the native JSON parser is far faster than
+        # parsing a multi-MB object literal as source (big page load-time win).
+        def _jsp(obj):
+            s = _json.dumps(obj).replace('</', '<\\/')   # neutralise premature </script>
+            return 'JSON.parse(' + _json.dumps(s) + ')'
+
+        # Resolve activity_defaults against the ACTUAL level labels (e.g. the data
+        # uses 'Single (1)', 'Low (2-10)' — not bare 'Single'/'Low'). Match case-
+        # insensitively by substring so ['Single','Low'] hits 'Single (1)' etc.
+        # If nothing matches, fall back to all-ticked (None) rather than an empty
+        # set — an empty JS array is truthy and would untick everything.
+        _act_def = None
+        if activity_defaults:
+            _wanted = [str(a).strip().lower() for a in activity_defaults]
+            _act_def = [a for a in all_activities
+                        if any(w in a.lower() for w in _wanted)]
+            if _act_def:
+                print(f'  [activity_defaults] focus view starts on {_act_def}')
+            else:
+                print(f'  [activity_defaults] none of {list(activity_defaults)} '
+                      f'matched present levels {list(all_activities)} — '
+                      f'defaulting to all activities ticked')
+                _act_def = None
+
+        # The data blobs (compound panels, patents, research, area metadata, plate/
+        # activity/range config) are NOT needed to first-paint the 3D plot — only
+        # once a gene is hovered/clicked or a filter is touched. Emitting them inline
+        # forces the browser to tokenise several MB (dominated by __GENE_COMPOUNDS__)
+        # before the plot can appear. Instead write them to a DEFERRED sidecar .js:
+        #   * the main document stays small (Plotly figure + handlers) → fast parse
+        #     and first-paint of the dots;
+        #   * the sidecar downloads in parallel and runs right before DOMContentLoaded,
+        #     so every global is set by the time the handlers (which all wait on
+        #     DOMContentLoaded) wire up — nothing is lost, it's the same globals.
+        # A <script defer src> (not fetch) is used deliberately: the HTML is opened
+        # via file:// double-click, where fetch() of a local file is CORS-blocked but
+        # a same-folder external script loads fine.
+        data_js = (
+            'window.__GENE_COMPOUNDS__ = ' + _jsp(custom if have_compounds else {}) + ';\n'
+            'window.__GENE_PATENTS__ = ' + _jsp(gene_patents_map) + ';\n'
             'window.__DEPMAP_URL__ = ' + _json.dumps(depmap_url_template) + ';\n'
             'window.__PAGE_SIZE__ = ' + str(int(page_size)) + ';\n'
-            'window.__PLATES__ = ' + _json.dumps(list(all_plates)) + ';\n'
-            'window.__ACTIVITIES__ = ' + _json.dumps(list(all_activities)) + ';\n'
-            'window.__RANGES__ = ' + _json.dumps(ranges_cfg) + ';\n'
-            'window.__AREA_DATA__ = ' + _json.dumps(area_data) + ';\n'
+            'window.__PLATES__ = ' + _jsp(list(all_plates)) + ';\n'
+            'window.__ACTIVITIES__ = ' + _jsp(list(all_activities)) + ';\n'
+            'window.__ACTIVITY_DEFAULTS__ = ' + (_jsp(_act_def) if _act_def else 'null') + ';\n'
+            'window.__CONTROL_COMPOUNDS__ = ' + _jsp([str(c) for c in (control_compounds or [])]) + ';\n'
+            'window.__CONTROL_DEFAULT_ON__ = ' + _json.dumps(bool(control_default_on)) + ';\n'
+            'window.__RANGES__ = ' + _jsp(ranges_cfg) + ';\n'
+            'window.__AREA_DATA__ = ' + _jsp(area_data) + ';\n'
             'window.__VOLCANO_MODE__ = '
             + _json.dumps('svg' if (volcano_significant and 'significant'
                                     in (volcano_source.columns if volcano_source is not None else []))
                           else ('path' if (volcano_dir and html_path) else 'b64')) + ';\n'
+            'window.__VOLCANO_BASE__ = ' + _json.dumps(_volcano_base) + ';\n'
+            'window.__THUMB_MODE__ = ' + _json.dumps('path' if _thumb_ext else 'b64') + ';\n'
+            'window.__THUMB_DIR__ = ' + _json.dumps(_thumb_rel) + ';\n'
             'window.__AXIS_LABELS__ = '
-            + _json.dumps({'x': x_label, 'y': y_label, 'z': z_label}) + ';\n'
-            'window.__AXIS_HELP__ = ' + _json.dumps(_axis_help) + ';\n'
-            'window.__GENE_RESEARCH__ = ' + _json.dumps(gene_research or {}) + ';</script>')
+            + _jsp({'x': x_label, 'y': y_label, 'z': z_label}) + ';\n'
+            'window.__AXIS_HELP__ = ' + _jsp(_axis_help) + ';\n'
+            'window.__GENE_RESEARCH__ = ' + _jsp(gene_research or {}) + ';\n')
+        _data_name = os.path.splitext(os.path.basename(html_path))[0] + '_data.js'
+        _data_path = os.path.join(os.path.dirname(html_path), _data_name)
+        with open(_data_path, 'w') as fh:
+            fh.write(data_js)
+        inject_data = '<script defer src="' + _data_name + '"></script>'
         with open(html_path) as fh:
             html = fh.read()
         with open(html_path, 'w') as fh:
             fh.write(html.replace('</body>', inject_data + _INTERFACE_INJECT + '</body>'))
-        print(f'wrote {html_path}  ({os.path.getsize(html_path) / 1e6:.1f} MB)')
+        print(f'wrote {html_path}  ({os.path.getsize(html_path) / 1e6:.1f} MB main doc)'
+              f'  +  {_data_name}  ({os.path.getsize(_data_path) / 1e6:.1f} MB, deferred)')
 
     if nb_display:
         fig.show()

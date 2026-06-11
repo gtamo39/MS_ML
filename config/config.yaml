@@ -12,6 +12,7 @@ DROPBOX_PROT: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/12_Proteom
 DROPBOX_ML: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/
 DROPBOX_VALIDATION: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/Daniela/20260518_ML_selected_genes_DF.csv
 DOWNLOADS: /mnt/c/Users/gtamo/Downloads
+GTLOCAL: /mnt/c/Users/gtamo/Desktop/GT/
 
 RAW_PROTEOMICS_PATH: data/MS/20260424_Proteomics_Database_CSV_Export.csv
 CLEAN_PROTEOMICS_PATH: data/MS/20260429_CDD_MS_SilentActive.csv
@@ -42,8 +43,9 @@ FEATURES_TYPE: prevalence
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
 CHEMLIB_OVERWRITE: false
-DFRAW_OVERWRITE: true
+DFRAW_OVERWRITE: false
 DFRAW_PATH: output/MS/df_raw.csv
+MS_PATH: output/MS/MS.csv
 
 # disease association research:
 RESEARCH_161_T_20260604: /mnt/c/Users/gtamo/Desktop/GT/disease_association/20260604_degradation_research.json
