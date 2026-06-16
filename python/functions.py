@@ -898,6 +898,11 @@ _INTERFACE_INJECT = '''
                   font: 11px sans-serif; color: #333; max-height: 80vh;
                   overflow-y: auto; display: none; user-select: none; }
   #filter-panel .fp-group + .fp-group { margin-top: 8px; }
+  /* section labels grouping the filters (Compound filters / Target filters) */
+  #filter-panel .fp-section { font-weight: 700; font-size: 10px; letter-spacing: .4px;
+                              text-transform: uppercase; color: #457B9D; margin: 0 0 5px; }
+  #filter-panel .fp-section.fp-sec2 { margin-top: 12px; padding-top: 8px;
+                                      border-top: 1px solid #ddd; }
   #filter-panel .pf-head { font-weight: 700; padding-bottom: 4px; cursor: pointer;
                            border-bottom: 1px solid #eee; margin-bottom: 4px; }
   #filter-panel .pf-head span { color: #1D3557; cursor: pointer; font-weight: 400;
@@ -1002,17 +1007,35 @@ _INTERFACE_INJECT = '''
   #range-panel .rp-reset:hover { text-decoration: underline; }
 </style>
 <div id="filter-panel">
+  <div class="fp-section" id="sec-compound">Compound filters</div>
   <div class="fp-group collapsed" id="plate-group">
-    <div class="pf-head"><span class="fp-caret">&#9662;</span>Plates <span id="pf-all">all</span> / <span id="pf-none">none</span></div>
+    <div class="pf-head" title="Show only experiments run on the ticked assay plates; a gene greys out when none of its compounds were measured on a ticked plate."><span class="fp-caret">&#9662;</span>Plates <span id="pf-all">all</span> / <span id="pf-none">none</span></div>
     <div id="pf-boxes" class="fp-boxes pf-2col"></div>
   </div>
-  <div class="fp-group" id="activity-group">
-    <div class="pf-head"><span class="fp-caret">&#9662;</span>Activity <span id="af-all">all</span> / <span id="af-none">none</span></div>
+  <div class="fp-group collapsed" id="activity-group">
+    <div class="pf-head" title="Keep only compound experiments at the ticked activity levels — the bucketed number of genes that compound significantly down-modulated."><span class="fp-caret">&#9662;</span>Activity <span id="af-all">all</span> / <span id="af-none">none</span></div>
     <div id="af-boxes" class="fp-boxes"></div>
   </div>
-  <div class="fp-group" id="compound-group" style="display:none">
-    <div class="pf-head"><span class="fp-caret">&#9662;</span>Compound</div>
-    <div id="cf-boxes" class="fp-boxes"><label><input type="checkbox" id="control-toggle" checked> Controls</label></div>
+  <div class="fp-group collapsed" id="compound-group" style="display:none">
+    <div class="pf-head" title="Toggle whole compound classes on or off — control compounds and known contaminants."><span class="fp-caret">&#9662;</span>Other</div>
+    <div id="cf-boxes" class="fp-boxes"><label><input type="checkbox" id="control-toggle" checked> Controls</label><label><input type="checkbox" id="contaminant-toggle" checked> Contaminants</label></div>
+  </div>
+  <div class="fp-section fp-sec2" id="sec-target">Target filters</div>
+  <div class="fp-group collapsed" id="depmap-group" style="display:none">
+    <div class="pf-head" title="Filter genes by their DepMap cell-fitness class (Pan-essential, Selective, Non-essential)."><span class="fp-caret">&#9662;</span>DepMap dependency <span id="df-all">all</span> / <span id="df-none">none</span></div>
+    <div id="df-boxes" class="fp-boxes"></div>
+  </div>
+  <div class="fp-group collapsed" id="confidence-group" style="display:none">
+    <div class="pf-head" title="Filter genes by the confidence of the degradation-target research assessment (High, Med, Low)."><span class="fp-caret">&#9662;</span>Confidence <span id="cn-all">all</span> / <span id="cn-none">none</span></div>
+    <div id="cn-boxes" class="fp-boxes"></div>
+  </div>
+  <div class="fp-group collapsed" id="lof-group" style="display:none">
+    <div class="pf-head" title="Filter genes by whether loss of function is expected to be therapeutically beneficial (Yes, No, Maybe)."><span class="fp-caret">&#9662;</span>LoF benefit <span id="lf-all">all</span> / <span id="lf-none">none</span></div>
+    <div id="lf-boxes" class="fp-boxes"></div>
+  </div>
+  <div class="fp-group collapsed" id="validation-group" style="display:none">
+    <div class="pf-head" title="Filter genes by FBXO31 validation status — experimentally dependent vs independent targets."><span class="fp-caret">&#9662;</span>Validation <span id="vf-all">all</span> / <span id="vf-none">none</span></div>
+    <div id="vf-boxes" class="fp-boxes"></div>
   </div>
 </div>
 <div id="hover-img">
@@ -1073,6 +1096,10 @@ _INTERFACE_INJECT = '''
     var pf     = document.getElementById("filter-panel");
     var pfBoxes = document.getElementById("pf-boxes");
     var afBoxes = document.getElementById("af-boxes");
+    var dfBoxes = document.getElementById("df-boxes");
+    var cnBoxes = document.getElementById("cn-boxes");
+    var lfBoxes = document.getElementById("lf-boxes");
+    var vfBoxes = document.getElementById("vf-boxes");
     var patents = window.__GENE_PATENTS__ || {};
     var depmapTpl = window.__DEPMAP_URL__ || "https://depmap.org/portal/gene/{gene}";
     var pageSize = window.__PAGE_SIZE__ || 5;
@@ -1095,7 +1122,71 @@ _INTERFACE_INJECT = '''
     var controlCompounds = {};
     (window.__CONTROL_COMPOUNDS__ || []).forEach(function(c) { controlCompounds[c] = true; });
     var controlOn = (window.__CONTROL_DEFAULT_ON__ !== false);  // default state of the tickbox
-    function cmpAllowed(t) { return controlOn || !controlCompounds[t[0]]; }
+    var contaminantCompounds = {};
+    (window.__CONTAMINANT_COMPOUNDS__ || []).forEach(function(c) { contaminantCompounds[c] = true; });
+    var contaminantOn = (window.__CONTAMINANT_DEFAULT_ON__ !== false);
+    // A compound is shown unless its class is toggled off (controls and/or contaminants).
+    function cmpAllowed(t) {
+      if (!controlOn && controlCompounds[t[0]]) return false;
+      if (!contaminantOn && contaminantCompounds[t[0]]) return false;
+      return true;
+    }
+    // DepMap dependency filter (gene-level): each gene's depmap_dependency category
+    // (Pan-essential / Selective / Non-essential / Other / "(no data)"). Unticking a
+    // category greys out the genes in it. Reuses the generic checkbox group below.
+    var geneDepmap = window.__GENE_DEPMAP__ || {};
+    var depmapCats = window.__DEPMAP_CATS__ || [];
+    // Optional focus default: if __*_DEFAULTS__ is a list, only those categories start
+    // ticked (an empty list ticks none); null/absent => all ticked. [] is truthy in JS,
+    // so "|| null" preserves an emitted empty list while mapping a missing global to null.
+    var depDefaults = window.__DEPMAP_DEFAULTS__ || null;
+    var tickedDep = {};
+    depmapCats.forEach(function(c) { tickedDep[c] = depDefaults ? (depDefaults.indexOf(c) !== -1) : true; });
+    function depAllowed(gene) {
+      if (!depmapCats.length) return true;
+      return tickedDep[geneDepmap[gene] || "(no data)"] !== false;
+    }
+    // Research confidence filter (gene-level): High / Med / Low / "(no data)".
+    var geneConf = window.__GENE_CONF__ || {};
+    var confCats = window.__CONF_CATS__ || [];
+    var confDefaults = window.__CONF_DEFAULTS__ || null;
+    var tickedConf = {};
+    confCats.forEach(function(c) { tickedConf[c] = confDefaults ? (confDefaults.indexOf(c) !== -1) : true; });
+    function confAllowed(gene) {
+      if (!confCats.length) return true;
+      return tickedConf[geneConf[gene] || "(no data)"] !== false;
+    }
+    // LoF therapeutic benefit filter (gene-level): Yes / No / Maybe / "(no data)".
+    var geneLof = window.__GENE_LOF__ || {};
+    var lofCats = window.__LOF_CATS__ || [];
+    var lofDefaults = window.__LOF_DEFAULTS__ || null;
+    var tickedLof = {};
+    lofCats.forEach(function(c) { tickedLof[c] = lofDefaults ? (lofDefaults.indexOf(c) !== -1) : true; });
+    function lofAllowed(gene) {
+      if (!lofCats.length) return true;
+      return tickedLof[geneLof[gene] || "(no data)"] !== false;
+    }
+    // Target-validation filter (gene-level): "Yes" tickbox controls genes in
+    // validated_targets, "No" controls devalidated_targets. A gene in neither
+    // set is unaffected; a gene in both shows while either box is ticked.
+    var validatedSet = {};
+    (window.__VALIDATED_TARGETS__ || []).forEach(function(g) { validatedSet[g] = true; });
+    var devalidatedSet = {};
+    (window.__DEVALIDATED_TARGETS__ || []).forEach(function(g) { devalidatedSet[g] = true; });
+    var valLabelYes = window.__VAL_LABEL_YES__ || "Yes";   // label for the validated box
+    var valLabelNo  = window.__VAL_LABEL_NO__  || "No";    // label for the devalidated box
+    var valCats = window.__VALIDATION_CATS__ || [];        // subset of the two labels present
+    var valDefaults = window.__VALIDATION_DEFAULTS__ || null;
+    var tickedVal = {};
+    valCats.forEach(function(c) { tickedVal[c] = valDefaults ? (valDefaults.indexOf(c) !== -1) : true; });
+    function valAllowed(gene) {
+      if (!valCats.length) return true;
+      var isV = validatedSet[gene], isD = devalidatedSet[gene];
+      if (!isV && !isD) return true;                       // not annotated -> unaffected
+      if (isV && tickedVal[valLabelYes] !== false) return true;
+      if (isD && tickedVal[valLabelNo] !== false) return true;
+      return false;
+    }
     var gd = document.querySelector(".plotly-graph-div") || document.querySelector(".js-plotly-plot");
     if (!gd) return;
 
@@ -1372,7 +1463,8 @@ _INTERFACE_INJECT = '''
         vps.forEach(function(pl) {
           var act = pl[3] ? ' · ' + pl[3] : '';
           var ng = pl[4] ? ' (' + pl[4] + ' genes)' : '';
-          html += '<div class="vlabel">' + currentGene + ' · ' + cmp + ' · '
+          var cid = pl[5] || cmp;   // MoleculeBatchID (per plate) when available, else compound
+          html += '<div class="vlabel">' + currentGene + ' · ' + cid + ' · '
                 + pl[0] + act + ' (logfc ' + pl[1] + ')' + ng + '</div>';
           html += pl[2] ? vimg(pl[2]) : '<div class="vmiss">(no volcano)</div>';
         });
@@ -1485,22 +1577,50 @@ _INTERFACE_INJECT = '''
     }
     var hasPlateG = buildGroup(plates, ticked, pfBoxes, "pf-all", "pf-none");
     var hasActG   = buildGroup(activities, tickedAct, afBoxes, "af-all", "af-none");
-    // "Compound" group with a "Controls" tickbox: shown only if control compounds
-    // were provided. Unticking removes control compounds from every gene (panel,
-    // volcanoes, gene greying). Its own collapsible group, like Plates / Activity.
-    var _cg = document.getElementById("compound-group");
-    var _ctb = document.getElementById("control-toggle");
-    if (_cg && _ctb && Object.keys(controlCompounds).length) {
-      _cg.style.display = "";
-      _ctb.checked = controlOn;   // reflect the configured default (may start unticked)
-      _ctb.addEventListener("change", function() {
-        controlOn = _ctb.checked;
+    // "Compound" group: one tickbox per compound class (Controls, Contaminants).
+    // Unticking a class removes its compounds from every gene (panel, volcanoes, gene
+    // greying). Each tickbox shows only if that class has compounds; the group shows if
+    // any class does. Its own collapsible group, like Plates / Activity.
+    function wireCompoundToggle(id, hasSet, getOn, setOn) {
+      var b = document.getElementById(id);
+      if (!b) return false;
+      if (!hasSet) { if (b.parentNode) b.parentNode.style.display = "none"; return false; }
+      b.checked = getOn();   // reflect the configured default (may start unticked)
+      b.addEventListener("change", function() {
+        setOn(b.checked);
         page = 0;
-        recolor3d();              // re-grey genes whose only compounds are controls
+        recolor3d();          // re-grey genes whose only compounds are in hidden classes
         if (pinned) renderPage();
       });
+      return true;
     }
-    if (hasPlateG || hasActG) pf.style.display = "block";
+    var _hasCtrl = wireCompoundToggle("control-toggle", Object.keys(controlCompounds).length > 0,
+                     function() { return controlOn; }, function(v) { controlOn = v; });
+    var _hasCont = wireCompoundToggle("contaminant-toggle", Object.keys(contaminantCompounds).length > 0,
+                     function() { return contaminantOn; }, function(v) { contaminantOn = v; });
+    var _cg = document.getElementById("compound-group");
+    if (_cg && (_hasCtrl || _hasCont)) _cg.style.display = "";
+    // DepMap dependency group — generic checkbox group keyed by category.
+    var hasDepG = buildGroup(depmapCats, tickedDep, dfBoxes, "df-all", "df-none");
+    var _dg = document.getElementById("depmap-group");
+    if (_dg && hasDepG) _dg.style.display = "";
+    // Confidence + LoF benefit groups — generic checkbox groups keyed by category.
+    var hasConfG = buildGroup(confCats, tickedConf, cnBoxes, "cn-all", "cn-none");
+    var _cnG = document.getElementById("confidence-group");
+    if (_cnG && hasConfG) _cnG.style.display = "";
+    var hasLofG = buildGroup(lofCats, tickedLof, lfBoxes, "lf-all", "lf-none");
+    var _lfG = document.getElementById("lof-group");
+    if (_lfG && hasLofG) _lfG.style.display = "";
+    // Target validation (Y/N) group — generic checkbox group keyed by "Yes"/"No".
+    var hasValG = buildGroup(valCats, tickedVal, vfBoxes, "vf-all", "vf-none");
+    var _vg = document.getElementById("validation-group");
+    if (_vg && hasValG) _vg.style.display = "";
+    // Section labels: hide a section header if none of its groups are present.
+    var _secC = document.getElementById("sec-compound");
+    if (_secC) _secC.style.display = (hasPlateG || hasActG || _hasCtrl || _hasCont) ? "" : "none";
+    var _secT = document.getElementById("sec-target");
+    if (_secT) _secT.style.display = (hasDepG || hasConfG || hasLofG || hasValG) ? "" : "none";
+    if (hasPlateG || hasActG || _hasCtrl || _hasCont || hasDepG || hasConfG || hasLofG || hasValG) pf.style.display = "block";
     // clicking a group header (not the all/none spans) collapses/expands its boxes
     var _heads = document.querySelectorAll("#filter-panel .pf-head");
     for (var _h = 0; _h < _heads.length; _h++) {
@@ -1541,6 +1661,31 @@ _INTERFACE_INJECT = '''
                       hover: d.hover || []};
         });
       }
+      var lastMasks = {}, lastTotal = 0;
+      // Build gene-name labels (scene.annotations) for in-range genes, but only for
+      // VISIBLE (legend-enabled) area traces, and capped to the labelMax most prominent
+      // (highest MS score). Constant-size SVG => no GPU depth-scaling. Capping instead of
+      // hide-all means widening the view keeps the top labels rather than clearing them
+      // (bug 1); skipping legendonly traces means toggling a disease area hides its
+      // labels along with its dots (bug 2).
+      function refreshLabels() {
+        var cand = [];
+        R.areaTraces.forEach(function(ti) {
+          var o = orig[ti], m = lastMasks[ti]; if (!o || !m) return;
+          if (gd.data[ti] && gd.data[ti].visible === "legendonly") return;
+          for (var k = 0; k < m.length; k++) if (m[k]) {
+            cand.push({x: o.x[k], y: o.y[k], z: o.z[k], text: o.text[k]});
+          }
+        });
+        if (R.labelMax !== undefined && cand.length > R.labelMax) {
+          cand.sort(function(a, b) { return b.z - a.z; });   // keep the highest-MS labels
+          cand = cand.slice(0, R.labelMax);
+        }
+        Plotly.relayout(gd, {"scene.annotations": cand.map(function(c) {
+          return {x: c.x, y: c.y, z: c.z, text: c.text, showarrow: false,
+                  yshift: 9, font: {size: 11, color: "#000"}};
+        })});
+      }
       function applyRanges() {
         var b = {};
         AX.forEach(function(a) {
@@ -1563,7 +1708,11 @@ _INTERFACE_INJECT = '''
             var inr = o.x[k] >= b.x[0] && o.x[k] <= b.x[1]
                    && o.y[k] >= b.y[0] && o.y[k] <= b.y[1]
                    && o.z[k] >= b.z[0] && o.z[k] <= b.z[1]
-                   && geneHasVisibleCompound(o.text[k]);
+                   && geneHasVisibleCompound(o.text[k])
+                   && depAllowed(o.text[k])
+                   && confAllowed(o.text[k])
+                   && lofAllowed(o.text[k])
+                   && valAllowed(o.text[k]);
             m.push(inr); if (inr) total++;
           }
           masks[ti] = m;
@@ -1582,26 +1731,18 @@ _INTERFACE_INJECT = '''
           tr.x = fx; tr.y = fy; tr.z = fz; tr.text = ft; tr.customdata = fcd;
           tr.hovertext = fhov;   // keep the tooltip aligned with the filtered points
         });
-        // Gene-name labels are drawn as scene.annotations (constant-size SVG overlays),
-        // NOT scatter3d 'text': gl3d text is depth-scaled by the GPU (far / low-MS genes
-        // get tiny labels) and no projection fixes it; annotations are always the same
-        // pixel size and plotly repositions them on rotate/zoom. Shown only while the
-        // in-range set is small enough to read (<= labelMax); names are always on hover.
-        var anns = [];
-        if (R.labelMax === undefined || total <= R.labelMax) {
-          R.areaTraces.forEach(function(ti) {
-            var o = orig[ti], m = masks[ti]; if (!o || !m) return;
-            for (var k = 0; k < m.length; k++) if (m[k]) {
-              anns.push({x: o.x[k], y: o.y[k], z: o.z[k], text: o.text[k],
-                         showarrow: false, yshift: 9, font: {size: 11, color: "#000"}});
-            }
-          });
-        }
+        // Labels are rebuilt by refreshLabels() (scene.annotations) — see there for the
+        // visible-traces + top-N-by-MS logic. Stash the masks/total so a later legend
+        // toggle can re-derive labels without recomputing the range filter.
+        lastMasks = masks; lastTotal = total;
         Plotly.redraw(gd);
-        Plotly.relayout(gd, {"scene.annotations": anns});
+        refreshLabels();
         document.getElementById("rp-count").textContent = total + " in range";
       }
       recolor3d = applyRanges;   // let the Plate/Activity checkboxes re-colour too
+      // Toggling a disease area in the legend changes trace visibility (plotly fires
+      // plotly_restyle); re-derive labels so hidden areas drop their labels too.
+      if (gd.on) gd.on("plotly_restyle", refreshLabels);
       AX.forEach(function(a) {
         var cfg = R[a];
         var lo = document.getElementById(a + "-lo");
@@ -2112,7 +2253,17 @@ def plot_3d_interface(
     control_genes=(),
     control_compounds=(),
     control_default_on=True,   # control-compound tickbox starts checked (controls shown)
+    contaminant_compounds=(),
+    contaminant_default_on=True,   # contaminant tickbox starts checked (contaminants shown)
     gene_research=None,
+    validated_targets=(),
+    devalidated_targets=(),
+    validated_label='Yes',
+    devalidated_label='No',
+    depmap_defaults=None,
+    conf_defaults=None,
+    lof_defaults=None,
+    validation_defaults=None,
     volcano_significant=False,
     volcano_dir=None,
     html_path=None,
@@ -2426,6 +2577,7 @@ def plot_3d_interface(
                 # high→silent for the checkbox panel; only levels present are kept.
                 has_act = 'activity' in compounds_df.columns
                 has_ng = 'n_genes' in compounds_df.columns   # genes measured in the experiment
+                has_mbid = 'molecule_batch_id' in compounds_df.columns  # per-plate batch id
                 if has_act:
                     _ACT_ORDER = ['High (>25)', 'Medium (11-25)', 'Low (2-10)',
                                   'Single (1)', 'Silent']
@@ -2445,7 +2597,7 @@ def plot_3d_interface(
                         smi = (cg['smiles'].dropna().iloc[0]
                                if cg['smiles'].notna().any() else None)
                         ei = len(entries)
-                        plate_rows = []   # [plate, logfc, volcano, activity, n_genes] per plate
+                        plate_rows = []   # [plate, logfc, volcano, activity, n_genes, mbid] per plate
                         for pi, (_, pr) in enumerate(cg.iterrows()):
                             plate_rows.append([
                                 str(pr['plate']),
@@ -2455,6 +2607,8 @@ def plot_3d_interface(
                                  else ''),
                                 (str(int(pr['n_genes'])) if has_ng and pd.notna(pr['n_genes'])
                                  else ''),
+                                (str(pr['molecule_batch_id']) if has_mbid
+                                 and pd.notna(pr['molecule_batch_id']) else ''),
                             ])
                             vk = pr[vkey_col]
                             if pd.notna(vk):
@@ -2557,8 +2711,7 @@ def plot_3d_interface(
                 _volcano_base = _rel   # emitted once; rows store only the filename
 
                 def _vfname(g, vk):
-                    key = f'{g}|{vk}|{volcano_xlim[0]}|{volcano_xlim[1]}|{volcano_size_px}|{_ext}'
-                    return hashlib.md5(key.encode()).hexdigest()[:16] + _ext
+                    return _volcano_cache_fname(g, vk, volcano_xlim, volcano_size_px, _ext)
 
                 # cache hits: file already on disk -> reference it, skip render
                 render = []
@@ -2681,12 +2834,16 @@ def plot_3d_interface(
         ]
 
     fig = go.Figure()
+    # Invisible backdrop of ALL genes. opacity=0 hides it visually, but the trace stays
+    # visible=True so its full-extent points still define the scene's autorange — that's
+    # what keeps the coloured dots anchored in place as the sliders filter them in/out.
+    # Hover + legend are off and the (now unused) full-genome hover text is dropped.
     fig.add_trace(go.Scatter3d(
         x=plot_df[x_col], y=plot_df[y_col], z=plot_df['_zplot'],
         mode='markers',
-        marker=dict(size=3, color='lightgrey', opacity=0.5, line=dict(width=0)),
+        marker=dict(size=3, color='lightgrey', opacity=0, line=dict(width=0)),
         name=f'all ({len(plot_df):,})',
-        text=_hover_text(plot_df), hoverinfo='text',
+        hoverinfo='skip', showlegend=False,
     ))
 
     NA_LABEL = '— no priority area —'
@@ -2854,6 +3011,85 @@ def plot_3d_interface(
                       f'defaulting to all activities ticked')
                 _act_def = None
 
+        # Research-derived gene-level filters (Target filters section). Each buckets a
+        # free-text field of the gene_research record into a canonical category for a
+        # tickbox filter, adding a "(no data)" bucket only if some plotted (highlighted)
+        # gene lacks a record. All three share the one gene_research pass below.
+        _dep_order = ['Pan-essential', 'Selective', 'Non-essential', 'Other']
+        _conf_order = ['High', 'Med', 'Low', 'Other']        # research confidence
+        _lof_order = ['Yes', 'No', 'Maybe', 'Other']         # LoF therapeutic benefit
+
+        def _prefix_cat(s, order):
+            # canonical category = first entry in `order` whose lowercase prefix the
+            # free text starts with; 'Other' if non-empty but unmatched, '' if empty.
+            s = str(s or '').strip().lower()
+            if not s:
+                return ''
+            for c in order:
+                if c != 'Other' and s.startswith(c.lower()):
+                    return c
+            return 'Other'
+
+        def _depmap_cat(s):
+            s = str(s or '').strip().lower()
+            if not s:
+                return ''
+            if s.startswith('pan-essential'):
+                return 'Pan-essential'
+            if s.startswith('non-essential'):
+                return 'Non-essential'
+            if s.startswith('selective'):
+                return 'Selective'
+            return 'Other'
+        gene_depmap, gene_conf, gene_lof = {}, {}, {}
+        if gene_research:
+            for _g, _rec in gene_research.items():
+                if isinstance(_rec, dict):
+                    _c = _depmap_cat(_rec.get('depmap_dependency'))
+                    if _c:
+                        gene_depmap[_g] = _c
+                    _cc = _prefix_cat(_rec.get('confidence'), _conf_order)
+                    if _cc:
+                        gene_conf[_g] = _cc
+                    _lc = _prefix_cat(_rec.get('lof_therapeutic_benefit'), _lof_order)
+                    if _lc:
+                        gene_lof[_g] = _lc
+
+        def _cats_with_nodata(gene_map, order):
+            cats = [c for c in order if c in set(gene_map.values())]
+            if cats and any(g not in gene_map for g in highlighted['gene']):
+                cats = cats + ['(no data)']
+            return cats
+        depmap_cats = _cats_with_nodata(gene_depmap, _dep_order)
+        conf_cats = _cats_with_nodata(gene_conf, _conf_order)
+        lof_cats = _cats_with_nodata(gene_lof, _lof_order)
+
+        # Resolve which category boxes start ticked. None => all ticked; a list keeps
+        # only the matching present categories (exact or prefix, case-insensitive);
+        # an empty list => none ticked. Returned to JS as a list, or 'null' for all.
+        def _resolve_defaults(defaults, cats):
+            if defaults is None:
+                return None
+            wanted = [str(d).strip().lower() for d in defaults]
+            return [c for c in cats
+                    if any(c.lower() == w or c.lower().startswith(w) for w in wanted)]
+        depmap_def = _resolve_defaults(depmap_defaults, depmap_cats)
+        conf_def = _resolve_defaults(conf_defaults, conf_cats)
+        lof_def = _resolve_defaults(lof_defaults, lof_cats)
+
+        # Target validation (Y/N) filter: "Yes" -> validated_targets, "No" ->
+        # devalidated_targets. Only emit a category if at least one plotted gene
+        # carries it, so the dropdown appears only when it can do something.
+        _hl_genes = set(highlighted['gene'])
+        validated_set = [str(g) for g in (validated_targets or [])]
+        devalidated_set = [str(g) for g in (devalidated_targets or [])]
+        validation_cats = []
+        if _hl_genes & set(validated_set):
+            validation_cats.append(validated_label)
+        if _hl_genes & set(devalidated_set):
+            validation_cats.append(devalidated_label)
+        validation_def = _resolve_defaults(validation_defaults, validation_cats)
+
         # The data blobs (compound panels, patents, research, area metadata, plate/
         # activity/range config) are NOT needed to first-paint the 3D plot — only
         # once a gene is hovered/clicked or a filter is touched. Emitting them inline
@@ -2877,6 +3113,8 @@ def plot_3d_interface(
             'window.__ACTIVITY_DEFAULTS__ = ' + (_jsp(_act_def) if _act_def else 'null') + ';\n'
             'window.__CONTROL_COMPOUNDS__ = ' + _jsp([str(c) for c in (control_compounds or [])]) + ';\n'
             'window.__CONTROL_DEFAULT_ON__ = ' + _json.dumps(bool(control_default_on)) + ';\n'
+            'window.__CONTAMINANT_COMPOUNDS__ = ' + _jsp([str(c) for c in (contaminant_compounds or [])]) + ';\n'
+            'window.__CONTAMINANT_DEFAULT_ON__ = ' + _json.dumps(bool(contaminant_default_on)) + ';\n'
             'window.__RANGES__ = ' + _jsp(ranges_cfg) + ';\n'
             'window.__AREA_DATA__ = ' + _jsp(area_data) + ';\n'
             'window.__VOLCANO_MODE__ = '
@@ -2889,7 +3127,22 @@ def plot_3d_interface(
             'window.__AXIS_LABELS__ = '
             + _jsp({'x': x_label, 'y': y_label, 'z': z_label}) + ';\n'
             'window.__AXIS_HELP__ = ' + _jsp(_axis_help) + ';\n'
-            'window.__GENE_RESEARCH__ = ' + _jsp(gene_research or {}) + ';\n')
+            'window.__GENE_RESEARCH__ = ' + _jsp(gene_research or {}) + ';\n'
+            'window.__GENE_DEPMAP__ = ' + _jsp(gene_depmap) + ';\n'
+            'window.__DEPMAP_CATS__ = ' + _jsp(depmap_cats) + ';\n'
+            'window.__DEPMAP_DEFAULTS__ = ' + (_jsp(depmap_def) if depmap_def is not None else 'null') + ';\n'
+            'window.__GENE_CONF__ = ' + _jsp(gene_conf) + ';\n'
+            'window.__CONF_CATS__ = ' + _jsp(conf_cats) + ';\n'
+            'window.__CONF_DEFAULTS__ = ' + (_jsp(conf_def) if conf_def is not None else 'null') + ';\n'
+            'window.__GENE_LOF__ = ' + _jsp(gene_lof) + ';\n'
+            'window.__LOF_CATS__ = ' + _jsp(lof_cats) + ';\n'
+            'window.__LOF_DEFAULTS__ = ' + (_jsp(lof_def) if lof_def is not None else 'null') + ';\n'
+            'window.__VALIDATED_TARGETS__ = ' + _jsp(validated_set) + ';\n'
+            'window.__DEVALIDATED_TARGETS__ = ' + _jsp(devalidated_set) + ';\n'
+            'window.__VALIDATION_CATS__ = ' + _jsp(validation_cats) + ';\n'
+            'window.__VALIDATION_DEFAULTS__ = ' + (_jsp(validation_def) if validation_def is not None else 'null') + ';\n'
+            'window.__VAL_LABEL_YES__ = ' + _json.dumps(str(validated_label)) + ';\n'
+            'window.__VAL_LABEL_NO__ = ' + _json.dumps(str(devalidated_label)) + ';\n')
         _data_name = os.path.splitext(os.path.basename(html_path))[0] + '_data.js'
         _data_path = os.path.join(os.path.dirname(html_path), _data_name)
         with open(_data_path, 'w') as fh:
@@ -3972,6 +4225,93 @@ def _volcano_render_worker(args):
         return ''
     finally:
         plt.close(fig)
+
+
+def _volcano_cache_fname(gene, key, xlim, size_px, ext='.svg'):
+    """Canonical on-disk volcano cache filename for a (focal gene, volcano key) pair.
+
+    Single source of truth for the name used by `plot_3d_interface`'s disk cache, so
+    a separate re-render pass (e.g. `recompute_volcanoes`) writes files the interface
+    later finds as cache hits. The key string is data-independent on purpose — the
+    cache is keyed by identity + render params, NOT by the underlying p-values, so a
+    data change (like flooring p-values) requires explicitly regenerating the file.
+    """
+    import hashlib
+    s = f'{gene}|{key}|{xlim[0]}|{xlim[1]}|{size_px}|{ext}'
+    return hashlib.md5(s.encode()).hexdigest()[:16] + ext
+
+
+def recompute_volcanoes(volcano_source, pairs, volcano_dir, *,
+                        volcano_key='uniquecontrast', significant=True,
+                        xlim=(-8.0, 8.0), size_px=350, n_jobs=1):
+    """
+    Re-render a specific set of ``(focal_gene, key)`` volcanoes to ``volcano_dir``,
+    overwriting the disk cache used by :func:`plot_3d_interface`. Filenames match
+    :func:`_volcano_cache_fname`, so a subsequent interface build picks them up as
+    cache hits (no full re-render).
+
+    Use this to refresh volcanoes after changing the underlying data (the cache is
+    NOT data-keyed, so a plain interface re-run would otherwise reuse stale images).
+
+    :param DataFrame volcano_source: long table with ``volcano_key``, ``genes``,
+        ``logfc``, ``pvalue`` (and ``significant`` when ``significant=True``).
+    :param iterable pairs: iterable of ``(gene, key_value)`` to render. ``gene`` is
+        the focal/ringed target; ``key_value`` selects the experiment's points.
+    :param str volcano_dir: output directory (created if missing).
+    :param xlim/size_px: MUST match the values passed to ``plot_3d_interface`` or the
+        filenames won't line up with what the interface expects.
+    :return dict: ``{'requested', 'written', 'skipped', 'dir'}``.
+    """
+    import os
+    import base64
+    pairs = [(str(g), k) for g, k in pairs]
+    if not pairs:
+        return {'requested': 0, 'written': 0, 'skipped': 0, 'dir': volcano_dir}
+    os.makedirs(volcano_dir, exist_ok=True)
+    sig = bool(significant) and ('significant' in volcano_source.columns)
+    ext = '.svg' if sig else '.png'
+
+    # Pre-slice the source per key once; rename the key column to 'compound' so the
+    # module-level worker (which filters on 'compound') can be reused as-is. Drop any
+    # pre-existing 'compound' first so the rename can't create a duplicate column
+    # (the source often carries both 'uniquecontrast' and a separate 'compound').
+    keys = sorted({k for _, k in pairs})
+    cols = ['genes', 'logfc', 'pvalue'] + (['significant'] if sig else [])
+    src = (volcano_source.drop(columns=['compound'], errors='ignore')
+           .rename(columns={volcano_key: 'compound'})
+           if volcano_key != 'compound' else volcano_source)
+    filt = (src.loc[src['compound'].isin(keys), ['compound'] + cols]
+            .dropna(subset=['genes', 'logfc', 'pvalue']))
+    sub_cache = {c: g for c, g in filt.groupby('compound', sort=False)}
+    empty = filt.iloc[0:0]
+
+    def _args(g, k):
+        return (g, k, sub_cache.get(k, empty), size_px, xlim[0], xlim[1], sig)
+
+    if n_jobs == 1:
+        contents = [_volcano_render_worker(_args(g, k)) for g, k in pairs]
+    else:
+        from joblib import Parallel, delayed
+        contents = Parallel(n_jobs=n_jobs, backend='loky')(
+            delayed(_volcano_render_worker)(_args(g, k)) for g, k in pairs)
+
+    written = skipped = 0
+    for (g, k), content in zip(pairs, contents):
+        if not content:
+            skipped += 1
+            continue
+        path = os.path.join(volcano_dir, _volcano_cache_fname(g, k, xlim, size_px, ext))
+        if sig:
+            with open(path, 'w', encoding='utf-8') as fh:
+                fh.write(content)
+        else:
+            with open(path, 'wb') as fh:
+                fh.write(base64.b64decode(content))
+        written += 1
+    print(f'> recompute_volcanoes: {written:,} written, {skipped:,} empty/failed '
+          f'(of {len(pairs):,} requested) -> {volcano_dir}')
+    return {'requested': len(pairs), 'written': written, 'skipped': skipped,
+            'dir': volcano_dir}
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
