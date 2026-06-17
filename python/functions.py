@@ -1583,18 +1583,20 @@ _INTERFACE_INJECT = '''
       if (!tg || !gd || typeof Plotly === "undefined") return;
       var CAM3D = {eye: {x: 1.25, y: 1.25, z: 1.25}, up: {x: 0, y: 0, z: 1},
                    center: {x: 0, y: 0, z: 0}, projection: {type: "perspective"}};
-      var CAM2D = {eye: {x: 2.5, y: 0, z: 0}, up: {x: 0, y: 0, z: 1},
-                   center: {x: 0, y: 0, z: 0}, projection: {type: "orthographic"}};
+      // pre-panned toward screen-centre: eye & center share the y/z offset so the look
+      // stays axis-aligned (flat); without the shift the ortho view sits bottom-right.
+      // User can drag further from here (dragmode 'pan').
+      var CAM2D = {eye: {x: 2.5, y: 0.30, z: -0.35}, up: {x: 0, y: 0, z: 1},
+                   center: {x: 0, y: 0.30, z: -0.35}, projection: {type: "orthographic"}};
       function setMode(two) {
         tg.querySelector(".seg2d").classList.toggle("active", two);
         tg.querySelector(".seg3d").classList.toggle("active", !two);
         Plotly.relayout(gd, {
           "scene.camera": two ? CAM2D : CAM3D,
           "scene.xaxis.visible": !two,
-          "scene.dragmode": two ? false : "turntable",
-          // 2D: a centred, squarer scene domain so the flattened plot sits mid-page
-          // (the full-width domain parks the orthographic projection bottom-right).
-          "scene.domain": two ? {x: [0.18, 0.72], y: [0.05, 0.97]} : {x: [0, 1], y: [0, 1]}
+          // 2D: 'pan' lets you drag the plot to reposition it (and scroll to zoom)
+          // without rotating out of the flat view; 3D restores rotate (turntable).
+          "scene.dragmode": two ? "pan" : "turntable"
         });
       }
       tg.addEventListener("click", function (e) {
