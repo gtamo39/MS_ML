@@ -386,6 +386,95 @@ def load_proteomics_data(
     return df_raw, MS
 
 
+def keep_latest_batch_per_compound(df_raw, compound_col='compound',
+                                   batch_col='batch', date_col='date',
+                                   verbose=True):
+    """
+    Collapse a per-(compound, gene) raw table to a single screen per compound.
+
+    Two rules, applied in priority order **within each compound**:
+
+      1. **Latest batch wins** — if a compound was screened under more than one
+         batch number (e.g. ``001`` and ``002``), keep only the rows of the
+         highest batch number.
+      2. **Latest date breaks ties** — if the surviving (highest) batch was
+         screened on more than one date (the "same batch measured twice" case),
+         keep only the rows from the most recent ``date_col``.
+
+    All rows of the single winning ``(batch, date)`` screen are kept — every
+    gene row and every plate replicate of that screen survives; replicate
+    aggregation happens downstream, not here. Batch is coerced to a number for
+    ranking (non-numeric batches rank below numeric ones).
+
+    :param df df_raw: per-(compound, gene) table; needs ``compound_col``,
+        ``batch_col`` and ``date_col``.
+    :param str compound_col: compound id column.
+    :param str batch_col: batch column (``'001'``, ``'002'``, …); coerced to
+        numeric for ranking.
+    :param str date_col: screen-date column (datetime-like / parseable).
+    :param bool verbose: print aggregate before/after counts — no per-compound
+        rows are printed.
+    :return: row subset of ``df_raw`` (original columns, index reset).
+    """
+    d = df_raw.copy()
+    # Rank keys (non-numeric batch -> -1 so a real batch always wins).
+    d['_batch_n'] = pd.to_numeric(d[batch_col], errors='coerce').fillna(-1)
+    d['_date'] = pd.to_datetime(d[date_col], errors='coerce')
+
+    # Rule 1: highest batch number per compound.
+    d['_win_batch'] = d.groupby(compound_col)['_batch_n'].transform('max')
+    d = d[d['_batch_n'] == d['_win_batch']]
+
+    # Rule 2: among the surviving batch, the latest date per compound.
+    d['_win_date'] = d.groupby(compound_col)['_date'].transform('max')
+    d = d[d['_date'] == d['_win_date']]
+
+    out = (d.drop(columns=['_batch_n', '_date', '_win_batch', '_win_date'])
+             .reset_index(drop=True))
+    if verbose:
+        print(f'> latest-batch/date filter: {len(df_raw):,} -> {len(out):,} rows '
+              f'| {df_raw[compound_col].nunique():,} -> {out[compound_col].nunique():,} '
+              f'compounds')
+    return out
+
+
+def collapse_ms_latest_measurement(MS, compound_col='compound', date_col='date',
+                                   verbose=True):
+    """
+    Collapse the MS metadata table to one row per compound, keeping the **latest
+    measurement** but stamping it with the compound's **earliest** screen date.
+
+    For a compound screened across several tranches, the most recent screen is
+    the one we trust (``ndown`` / ``activity`` from the latest ``date_col`` row),
+    but it is attributed to the date the compound was *first* screened — so
+    tranche/cohort grouping counts the compound when it first appeared.
+
+    Example — ``SRB1`` with ``(ndown=3, 2026-06-01)`` and ``(ndown=5, 2026-06-16)``
+    collapses to a single row ``(ndown=5, date=2026-06-01)``.
+
+    All other columns (``origin``, ``activity``, …) come from the latest-dated
+    row; only ``date_col`` is overwritten with the earliest date.
+
+    :param df MS: MS metadata, one row per (compound, tranche).
+    :param str compound_col: compound id column.
+    :param str date_col: screen-date column (datetime-like / parseable).
+    :param bool verbose: print aggregate before/after counts.
+    :return: one row per compound (original columns, index reset).
+    """
+    d = MS.copy()
+    d[date_col] = pd.to_datetime(d[date_col], errors='coerce')
+    earliest = d.groupby(compound_col)[date_col].min()                 # first-seen date
+    out = (d.sort_values(date_col)                                     # latest measurement
+             .drop_duplicates(compound_col, keep='last')
+             .reset_index(drop=True))
+    out[date_col] = out[compound_col].map(earliest)                    # stamp earliest date
+    if verbose:
+        print(f'> MS collapse (latest measurement, earliest date): '
+              f'{len(MS):,} -> {len(out):,} rows '
+              f'| {MS[compound_col].nunique():,} compounds')
+    return out
+
+
 def plot_activity_rate_by_tranche(MS, date_col='date', activity_col='activity',
                                   silent_label='Silent', colors=None,
                                   annotate=True, ax=None, dpi=150):
@@ -549,6 +638,263 @@ def plot_activity_composition_over_time(
 
     summary = pd.DataFrame(shares.T, index=[pd.Timestamp(d) for d in dates], columns=cats)
     summary.insert(0, 'n', ns); summary.index.name = date_col
+    return ax, summary
+
+
+def plot_activity_composition_bars(
+        MS, date_col='date', activity_col='activity',
+        cats=('Silent', 'Single (1)', 'Low (2-10)', 'Medium (11-25)', 'High (>25)'),
+        colors=None, silent_label='Silent',
+        annotate=True, min_pct_label=3.0, min_label_h_frac=0.03,
+        show_n=True, dpi=150, ax=None):
+    """
+    Stacked **vertical bars** of MS activity composition, one bar per screening
+    tranche. Unlike :func:`plot_activity_composition_over_time` (which normalises
+    every tranche to 100 % and hides how many compounds each holds), here the
+    **bar height is the compound count** ``n`` — so the absolute scale is visible
+    — while each activity segment is annotated with its **within-tranche
+    proportion** (per-segment counts live in the returned ``summary``). Same
+    categories / colour palette as the area view.
+
+    Expects the unified MS table, one row per compound-tranche::
+
+        compound      ndown  origin       activity      date
+        SRB-0000385   3.0    MS20260429   Low (2-10)    2026-04-29
+
+    :param df MS: unified MS metadata.
+    :param str date_col: tranche-date column (parsed with ``pd.to_datetime``).
+    :param str activity_col: categorical activity column; auto-falls back to the
+        first column containing 'activity'.
+    :param cats: category order, BOTTOM → TOP of each bar.
+    :param colors: per-category colours — a positional list (same order as
+        ``cats``, recycled if shorter) OR a dict ``{category: colour}``. ``None``
+        keeps the built-in palette (shared with the area view).
+    :param str silent_label: inactive label (only used to label the activity rate).
+    :param bool annotate: write each segment's proportion (%) inside it.
+    :param float min_pct_label: skip the in-segment label below this share (%) to
+        avoid clutter on thin slices.
+    :param float min_label_h_frac: also skip a label when its segment is shorter
+        than this fraction of the y-axis — i.e. too thin to fit text without
+        overlapping (small tranches); those counts stay in ``summary``.
+    :param bool show_n: print the non-silent activity rate + ``n=`` atop each bar.
+    :param int dpi: figure resolution (only used when ``ax`` is None; default 150).
+    :param ax: optional matplotlib axes.
+    :return: ``(ax, summary)`` — axes and a per-tranche DataFrame indexed by date
+        with an ``n`` column and one **count** column per category.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patheffects as pe
+    _DEFAULT_COLORS = ('#d8cdbf', '#c9b79a', '#88a06a', '#d99a3a', '#b8412f')
+    cats = list(cats)
+    if colors is None:
+        colors = list(_DEFAULT_COLORS)
+    elif isinstance(colors, dict):
+        colors = [colors.get(c, '#cccccc') for c in cats]      # map by category; grey fallback
+    else:
+        colors = list(colors)
+    colors = [colors[i % len(colors)] for i in range(len(cats))]   # match length / recycle
+
+    df = MS.copy()
+    if activity_col not in df.columns:
+        activity_col = next((c for c in df.columns if 'activity' in c.lower()),
+                            activity_col)
+    df[date_col] = pd.to_datetime(df[date_col])
+
+    grp   = df.groupby(date_col)
+    dates = sorted(grp.groups)
+    ns    = np.array([len(grp.get_group(d)) for d in dates])
+    counts = np.zeros((len(cats), len(dates)))
+    for j, d in enumerate(dates):
+        vc = grp.get_group(d)[activity_col].value_counts()
+        counts[:, j] = [vc.get(c, 0) for c in cats]
+    # within-tranche shares (column-normalised counts) — for the in-bar labels
+    col_tot = counts.sum(axis=0)
+    shares  = np.divide(counts, col_tot, out=np.zeros_like(counts),
+                        where=col_tot > 0)
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(1.6 * len(dates) + 3, 5.5), dpi=dpi)
+    x = np.arange(len(dates))
+    y_top = ns.max() * 1.12                                    # axis top; sets the fit threshold
+    bottom = np.zeros(len(dates))
+    for i, c in enumerate(cats):
+        ax.bar(x, counts[i], bottom=bottom, color=colors[i], label=c,
+               edgecolor='white', linewidth=0.6, width=0.8)
+        if annotate:
+            for j in range(len(dates)):
+                # label only slices that clear the share floor AND are tall enough to fit text
+                if (shares[i, j] * 100 >= min_pct_label
+                        and counts[i, j] >= min_label_h_frac * y_top):
+                    ax.text(x[j], bottom[j] + counts[i, j] / 2,
+                            f'{shares[i, j]:.0%}',
+                            ha='center', va='center', fontsize=8, color='black',
+                            path_effects=[pe.withStroke(linewidth=2, foreground='white')])
+        bottom += counts[i]
+
+    if show_n:
+        rate = 1 - shares[cats.index(silent_label)]            # non-silent share per tranche
+        for j in range(len(dates)):
+            ax.text(x[j], ns[j], f'{rate[j]:.0%} active\nn={ns[j]:,}',
+                    ha='center', va='bottom', fontsize=8.5, fontweight='bold')
+
+    ax.set_ylim(0, y_top)
+    ax.set_ylabel('compounds (n)'); ax.set_xlabel('MS tranche')
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'{pd.Timestamp(d):%Y-%m-%d}' for d in dates])
+    ax.set_title('MS activity composition by tranche — bar height = compound count',
+                 fontsize=13)
+    for s in ('top', 'right'):
+        ax.spines[s].set_visible(False)
+    # legend top→bottom = stack top→bottom (High first), so it reads like the bars
+    h, l = ax.get_legend_handles_labels()
+    ax.legend(h[::-1], l[::-1], loc='upper left', bbox_to_anchor=(1.02, 1.0),
+              frameon=False, fontsize=8)
+
+    summary = pd.DataFrame(counts.T, index=[pd.Timestamp(d) for d in dates], columns=cats)
+    summary.insert(0, 'n', ns); summary.index.name = date_col
+    return ax, summary
+
+
+def plot_activity_area_absolute(
+        MS, date_col='date', activity_col='activity',
+        cats=('Silent', 'Single (1)', 'Low (2-10)', 'Medium (11-25)', 'High (>25)'),
+        colors=None, cumulative=True, annotate_total=True,
+        show_rate_line=True, silent_label='Silent', rate_color='#1d3557',
+        dpi=150, ax=None):
+    """
+    **Absolute** (count, not 100%-normalised) stacked area of MS activity
+    composition across tranches — the "growing library" view. With
+    ``cumulative=True`` (default) each band is the running count of compounds
+    screened up to a tranche, so the stack grows monotonically; a dotted
+    **TOTAL** boundary with a marker per tranche traces the height and the total
+    is annotated at the first and last tranche. Styled after the editorial
+    template (cream ground, earth palette, horizontal gridlines, bottom legend
+    with a dotted TOTAL swatch).
+
+    Expects the unified MS table, one row per compound-tranche (see
+    :func:`plot_activity_composition_over_time`). With the upstream
+    ``collapse_ms_latest_measurement`` each compound sits in its first-seen
+    tranche, so the cumulative curve is the library size over time.
+
+    :param df MS: unified MS metadata.
+    :param str date_col: tranche-date column (parsed with ``pd.to_datetime``).
+    :param str activity_col: categorical activity column; auto-falls back to the
+        first column containing 'activity'.
+    :param cats: category order, BOTTOM → TOP of the stack.
+    :param colors: per-category colours — positional list OR ``{category: colour}``
+        dict OR ``None`` for the built-in earth-tone template palette.
+    :param bool cumulative: stack the running total across tranches (template
+        look); ``False`` plots each tranche's own counts.
+    :param bool annotate_total: label the total at the first/last tranche.
+    :param bool show_rate_line: overlay the per-tranche non-silent activity rate
+        on a right-hand 0–100% axis (same definition as the area view; computed
+        per tranche, not cumulatively, so the trend isn't flattened by the first
+        large tranche).
+    :param str silent_label: inactive label (the rate is the non-silent share).
+    :param str rate_color: colour of the activity-rate line / right axis.
+    :param int dpi: figure resolution (only used when ``ax`` is None; default 150).
+    :param ax: optional matplotlib axes.
+    :return: ``(ax, summary)`` — axes and a per-tranche DataFrame indexed by date
+        with an ``n`` (= column total, cumulative if set) column and one count
+        column per category.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patheffects as pe
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+    _TEMPLATE_COLORS = ('#b0492f', '#7f9b6b', '#5c5147', '#c9bca0', '#d99a3a')
+    _BG, _TOTAL_C, _GRID = 'white', '#2b2b2b', '#e6e6e6'
+    cats = list(cats)
+    if colors is None:
+        colors = list(_TEMPLATE_COLORS)
+    elif isinstance(colors, dict):
+        colors = [colors.get(c, '#cccccc') for c in cats]
+    else:
+        colors = list(colors)
+    colors = [colors[i % len(colors)] for i in range(len(cats))]
+
+    df = MS.copy()
+    if activity_col not in df.columns:
+        activity_col = next((c for c in df.columns if 'activity' in c.lower()),
+                            activity_col)
+    df[date_col] = pd.to_datetime(df[date_col])
+
+    grp   = df.groupby(date_col)
+    dates = sorted(grp.groups)
+    counts = np.zeros((len(cats), len(dates)))
+    for j, d in enumerate(dates):
+        vc = grp.get_group(d)[activity_col].value_counts()
+        counts[:, j] = [vc.get(c, 0) for c in cats]
+    per_tranche = counts.copy()                                # raw per-tranche, for the rate line
+    if cumulative:
+        counts = counts.cumsum(axis=1)                         # running library size per band
+    totals = counts.sum(axis=0)
+    x = np.arange(len(dates))
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(1.3 * len(dates) + 4, 5.5), dpi=dpi)
+    fig = ax.get_figure()
+    fig.patch.set_facecolor(_BG); ax.set_facecolor(_BG)
+    ax.set_axisbelow(True)
+    ax.grid(axis='y', color=_GRID, linewidth=1.0)
+
+    ax.stackplot(x, counts, colors=colors, labels=cats,
+                 edgecolor='white', linewidth=0.7)
+    # dotted TOTAL boundary + a marker per tranche
+    ax.plot(x, totals, color=_TOTAL_C, lw=1.4, linestyle=(0, (1, 1)),
+            marker='o', ms=4, mfc=_TOTAL_C, mec=_TOTAL_C, zorder=5)
+    if annotate_total:
+        # tuck totals just below their markers so they clear the rate-line labels
+        for j in (0, len(dates) - 1):
+            ax.annotate(f'{int(totals[j]):,}', (x[j], totals[j]),
+                        textcoords='offset points', xytext=(0, -13), va='top',
+                        ha='center', fontsize=11, fontweight='bold', color=_TOTAL_C,
+                        path_effects=[pe.withStroke(linewidth=3, foreground=_BG)])
+
+    ax.set_xlim(x[0], x[-1]); ax.set_ylim(0, totals.max() * 1.12)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'{pd.Timestamp(d):%Y-%m-%d}' for d in dates])
+    ax.set_ylabel('compounds (cumulative n)' if cumulative else 'compounds (n)')
+    ax.tick_params(length=0)
+    for s in ax.spines.values():
+        s.set_visible(False)
+    ax.plot([0, 1], [1, 1], transform=ax.transAxes, color='black', lw=0.8,
+            clip_on=False, zorder=6)                            # editorial top rule
+
+    # per-tranche non-silent activity rate on a right-hand 0–100% axis
+    if show_rate_line:
+        pt_tot = per_tranche.sum(axis=0)
+        rate = 1 - np.divide(per_tranche[cats.index(silent_label)], pt_tot,
+                             out=np.zeros_like(pt_tot), where=pt_tot > 0)
+        axr = ax.twinx()
+        axr.set_ylim(0, 1); axr.set_xlim(ax.get_xlim())
+        axr.plot(x, rate, color=rate_color, lw=3, marker='o', ms=5, zorder=7)
+        for j in range(len(dates)):                            # label each dot with its rate
+            axr.annotate(f'{rate[j]:.0%}', (x[j], rate[j]),
+                         textcoords='offset points', xytext=(0, 9),
+                         ha='center', fontsize=9, fontweight='bold',
+                         color=rate_color, zorder=8,
+                         path_effects=[pe.withStroke(linewidth=3, foreground=_BG)])
+        axr.set_yticks([0, .25, .5, .75, 1])
+        axr.set_yticklabels(['0%', '25%', '50%', '75%', '100%'])
+        axr.set_ylabel('per tranche activity rate (non-silent)', color=rate_color)
+        axr.tick_params(axis='y', colors=rate_color, length=0)
+        for s in axr.spines.values():
+            s.set_visible(False)
+
+    # bottom legend: category swatches + dotted TOTAL box + the rate line
+    handles = [Patch(facecolor=colors[i], label=c.upper()) for i, c in enumerate(cats)]
+    handles.append(Line2D([0], [0], marker='s', markersize=10, linestyle='none',
+                          markerfacecolor='none', markeredgecolor=_TOTAL_C,
+                          label='TOTAL'))
+    if show_rate_line:
+        handles.append(Line2D([0], [0], color=rate_color, lw=3, marker='o', ms=5,
+                              label='activity rate (non-silent)'))
+    ax.legend(handles=handles, loc='upper center', bbox_to_anchor=(0.5, -0.1),
+              ncol=len(cats) + 2, frameon=False, fontsize=8, handlelength=1.4)
+
+    summary = pd.DataFrame(counts.T, index=[pd.Timestamp(d) for d in dates], columns=cats)
+    summary.insert(0, 'n', totals.astype(int)); summary.index.name = date_col
     return ax, summary
 
 
@@ -3416,6 +3762,58 @@ def _bh_fdr(pvals):
     return np.clip(q, 0, 1)
 
 
+def load_gmt(gmt_paths, *, gene_upper=True):
+    """Parse MSigDB-style ``.gmt`` files into a ``gene2term`` long table for
+    :func:`gsea_preranked` / :func:`ora_enrichment` — so cluster signatures can be
+    qualified against curated gene sets (Hallmark, Reactome, ...) fully locally.
+
+    Each ``.gmt`` line is ``term_name <tab> description <tab> gene1 <tab> gene2 ...``.
+
+    :param dict gmt_paths: ``{collection: path | glob | [paths]}``; ``collection``
+        (e.g. ``'Hallmark'``) becomes the ``collection`` column. Globs are expanded
+        so version-stamped filenames need not be hard-coded.
+    :param bool gene_upper: upper-case gene symbols (match HGNC / MSigDB symbols).
+    :raises FileNotFoundError: if a collection's pattern matches no file.
+    :return df: columns ``gene``, ``collection``, ``term_id``, ``term_name``
+        (one row per gene-in-term; ``term_id`` == ``term_name`` == the set name).
+    """
+    import glob
+    rows = []
+    for collection, spec in gmt_paths.items():
+        paths = list(spec) if isinstance(spec, (list, tuple)) else glob.glob(str(spec))
+        if not paths:
+            raise FileNotFoundError(f'no .gmt for collection {collection!r} matching {spec!r}')
+        for path in paths:
+            with open(path) as fh:
+                for line in fh:
+                    parts = line.rstrip('\n').split('\t')
+                    if len(parts) < 3:
+                        continue
+                    term, _desc, *genes = parts
+                    for g in genes:
+                        if g:
+                            rows.append((g.upper() if gene_upper else g, collection, term, term))
+    return pd.DataFrame(rows, columns=['gene', 'collection', 'term_id', 'term_name'])
+
+
+def mean_logfc_rank(df_raw, compounds, *, compound_col='compound', gene_col='genes',
+                    logfc_col='logfc', gene_upper=True):
+    """Mean per-gene logFC across a set of compounds — the 'mean proteome change'
+    of a signature cluster, as a signed ranking for :func:`gsea_preranked`.
+
+    :param df df_raw: per-(compound, gene) differential table.
+    :param iterable compounds: compound ids defining the cluster.
+    :param bool gene_upper: upper-case gene symbols (match the gene-set table).
+    :return Series: index = gene, value = mean logFC across the cluster.
+    """
+    sub = df_raw[df_raw[compound_col].isin(set(compounds))]
+    r = sub.groupby(gene_col)[logfc_col].mean()
+    if gene_upper:
+        r.index = r.index.astype(str).str.upper()
+        r = r.groupby(level=0).mean()
+    return r.dropna()
+
+
 def _term_members(gene2term, collections, universe):
     """{(collection, term_id, term_name): frozenset(genes ∩ universe)} restricted
     to ``collections`` and the gene ``universe`` (set)."""
@@ -3802,6 +4200,76 @@ def plot_function_enrichment(df, *, nes_col='gsea_NES', fdr_col='gsea_fdr',
     ], loc='lower right', fontsize=8, frameon=False)
     plt.tight_layout()
     return ax
+
+
+def select_strong_signature_compounds(
+        func_enrich_all, MS, *,
+        activity_bins=('Low (2-10)', 'Medium (11-25)', 'High (>25)'),
+        max_abs_nes=2.0, nes_col='gsea_NES', compound_col='compound',
+        activity_col='activity', verbose=True):
+    """
+    Restrict the per-(compound, function) enrichment table to compounds with a
+    **strong, well-defined cell signature** — the cohort for the
+    structure↔cell-state analysis (signature clustering + chemistry→class ML).
+    Weak/diffuse compounds otherwise contribute near-noise NES vectors that blur
+    the very association being tested.
+
+    A compound qualifies only if BOTH hold:
+
+      1. **Response-magnitude floor** — its MS ``activity_col`` is in
+         ``activity_bins`` (``ndown ≥ 2`` by default), dropping Silent / Single.
+      2. **Dominant signature axis** — its peak ``|NES|`` across functions is
+         ``≥ max_abs_nes``, i.e. the signature has a clear leading direction.
+
+    Deliberately **not** gated on ``gsea_fdr``: GSEA-preranked flags a
+    "significant" function for ~all compounds (including Silent), so the FDR
+    can't separate signal from noise here; magnitude + peak NES can.
+
+    :param df func_enrich_all: tidy output of :func:`function_enrichment_all`.
+    :param df MS: unified MS metadata (``compound`` | ``activity`` | …).
+    :param activity_bins: MS activity labels to keep.
+    :param float max_abs_nes: minimum peak ``|NES|`` for a compound to qualify.
+    :param str nes_col: GSEA NES column in ``func_enrich_all``.
+    :param str compound_col: compound id column (in both frames).
+    :param str activity_col: activity column in ``MS``.
+    :param bool verbose: print aggregate before/after counts (no compound IDs).
+    :return: row subset of ``func_enrich_all`` for the qualifying compounds.
+    """
+    active = set(MS.loc[MS[activity_col].isin(list(activity_bins)), compound_col])
+    peak = func_enrich_all.groupby(compound_col)[nes_col].apply(
+        lambda s: np.nanmax(np.abs(s.to_numpy())) if s.notna().any() else np.nan)
+    strong = set(peak.index[peak >= max_abs_nes])
+    keep = active & strong
+    out = func_enrich_all[func_enrich_all[compound_col].isin(keep)]
+    if verbose:
+        n_in, n_out = func_enrich_all[compound_col].nunique(), out[compound_col].nunique()
+        print(f'> strong-signature cohort: activity in {list(activity_bins)} '
+              f'AND max|NES| >= {max_abs_nes}')
+        print(f'  {n_in:,} -> {n_out:,} compounds '
+              f'(magnitude floor: {len(active):,} | peak-NES: {len(strong):,})')
+    return out
+
+
+def label_signature_clusters(means, prefix='C'):
+    """
+    Name each signature cluster by its single most-extreme function (largest
+    ``|mean NES|``) with a direction arrow — e.g. ``C0: Cell cycle ↓``.
+
+    Replaces the older ``down {idxmin} | up {idxmax}`` two-sided label. On a
+    dominant single up/down axis (small K) the clusters are mirror images, so the
+    secondary pole (e.g. 'Transport / vesicle') appears as ``up`` in one cluster
+    and ``down`` in the other and reads as noise; the strongest pole is the
+    defining phenotype. K-agnostic: one label per row of ``means``.
+
+    :param df means: cluster × function mean-NES table (index = cluster id), as
+        produced by ``NES.groupby(labels).mean()``.
+    :param str prefix: cluster-id prefix (``C`` -> ``C0``, ``C1`` …).
+    :return: dict ``{cluster_id: label}`` keyed by the index of ``means``.
+    """
+    def _dom(row):
+        f = row.abs().idxmax()                                 # strongest |NES| function
+        return f"{f.split(' / ')[0]} {'↓' if row[f] < 0 else '↑'}"
+    return {c: f'{prefix}{c}: {_dom(means.loc[c])}' for c in means.index}
 
 
 def signature_matrix_from_enrichment(func_enrich_all, *, value_col='gsea_NES',

@@ -28,6 +28,7 @@ CYTONM: AUC
 CYTODATA: data/cytotox/20260602_AUC_cytotox.csv
 CYTOINFO: data/cytotox/cellline_info.xlsx
 DEPMAP_DIR: data/external/depmap/
+MSIGDB_DIR: data/external/msigdb     # drop MSigDB symbols GMTs here (h.all*, c2.cp.reactome*) to qualify signature clusters
 
 CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
 OT_ROOT: data/external/opentarget
@@ -46,6 +47,22 @@ CHEMLIB_OVERWRITE: false
 DFRAW_OVERWRITE: false
 DFRAW_PATH: output/MS/df_raw.csv
 MS_PATH: output/MS/MS.csv
+
+# strong cell-signature cohort (func_enrich_all_sel): which compounds enter the
+# structure<->cell-state analysis (signature clustering + chemistry->class ML).
+# NOT gated on gsea_fdr — it flags ~all compounds (incl. Silent), so it can't
+# define signal. Gate = response-magnitude floor AND a dominant signature axis.
+SIG_ACTIVITY_BINS:            # MS activity labels to keep (ndown >= 2)
+- Low (2-10)
+- Medium (11-25)
+- High (>25)
+SIG_MAX_ABS_NES: 2.0          # require peak |GSEA NES| >= this across the functions
+SIG_K: 2                      # number of cell-signature classes (KMeans on the NES vectors)
+
+CONTAMINANTS: data/MS/20260611_contaminants.csv
+CONTROLS: 
+- SRB-0000692
+- SRB-0000615
 
 # disease association research:
 RESEARCH_161_T_20260604: /mnt/c/Users/gtamo/Desktop/GT/disease_association/20260604_degradation_research.json

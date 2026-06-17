@@ -1,6 +1,6 @@
 # Notebook documentation
 
-Five Jupyter notebooks in [`vignettes/`](../vignettes/) make up the
+Six Jupyter notebooks in [`vignettes/`](../vignettes/) make up the
 end-to-end MS-proteomics SAR analysis. They share the same upstream data
 ([`data/MS/`](../data/MS)) and helper modules (`python/`, `Scripts/`),
 but each one answers a different question:
@@ -12,6 +12,7 @@ but each one answers a different question:
 | [`MS_TargetML.ipynb`](../vignettes/MS_TargetML.ipynb)                          | "Which target genes have predictable SAR *and* pharma/disease relevance?"          |
 | [`MS_ML_Prioritization.ipynb`](../vignettes/MS_ML_Prioritization.ipynb)        | "Given a trained gene-model, which library / virtual compounds should we screen?"  |
 | [`MS_Interface.ipynb`](../vignettes/MS_Interface.ipynb)                        | "Interactively browse FBX targets by SAR/disease/MS score, their hit compounds, volcanoes, and degradation research." |
+| [`MS_cytotox.ipynb`](../vignettes/MS_cytotox.ipynb)                            | "How does compound cytotoxicity across cell lines relate to gene expression (e.g. FBXO31) — and can expression predict sensitivity?" |
 
 All follow the project conventions in [`CLAUDE.md`](../CLAUDE.md):
 heavy intermediates persisted under `data/`/`output/`, parameters in
@@ -218,11 +219,18 @@ interactive volcanoes and per-gene degradation research.
   `activity`). Used to link experiments to compounds (batch suffix stripped
   to the `SRB-XXXXXXX` chem-lib key).
 - chem library (`CHEMLIB_PATH`) — SMILES for compound thumbnails.
-- `RESEARCH_161_T_20260604` — a JSON list (one record/gene) of degradation
+- `GENE_RESEARCH` — a JSON list (one record/gene) of degradation
   research (loaded from a local path; see the load cell). Fields:
   `target_class, lof_therapeutic_benefit, degrader_vs_inhibitor_rationale,
   degrader_feasibility, depmap_dependency, opentargets_top_indications,
   existing_degraders, safety_flags, confidence, biology_rationale, sources`.
+  Several of these drive client-side filters (see "Filter panel" below).
+
+**Whole-Px variant (step 4).** Besides the FBX cockpit, the notebook builds a
+**whole-proteome** interface from the unified `measure`/`mscore`/`report` tables
+(same `fn.plot_3d_interface`): ~4,600 plottable genes, written to
+`GTLOCAL/interfaces/` (or `DROPBOX_ML/interfaces/`). It carries the full filter
+panel and per-plate volcanoes for every significant-down hit.
 
 **Compound ↔ gene association.** A compound appears under a gene only
 where that gene is **significantly down-modulated** in the experiment —
@@ -246,30 +254,52 @@ browser):
   subset; binary-searched percentile), with the association handle starting
   at `0.35` (`range_defaults={'y': 0.35}`). A handle within one step of its
   limit is treated as unbounded so axis-extreme genes aren't dropped.
-- **Plate + Activity checkboxes** (top-left) — tick which plates / `activity`
-  levels count. **Option B**: a plate-row shows only if its plate *and*
-  activity are ticked; a compound lists only if it has a visible row; and a
-  **gene greys out of the 3D plot** if it has no compound on the ticked
-  plates/activities (`geneHasVisibleCompound`).
+- **Filter panel** (top-left, collapsible groups under two section headers,
+  each header carrying a one-line `title=` tooltip):
+  - *Compound filters* — **Plates**, **Activity** (`activity`/nr-down levels),
+    and **Other** (toggle whole compound classes: **Controls** and
+    **Contaminants**, both off by default). **Option B**: a plate-row shows only
+    if its plate *and* activity are ticked; a compound lists only if it has a
+    visible row; a **gene greys out of the 3D plot** if it has no visible
+    compound (`geneHasVisibleCompound` + `cmpAllowed`).
+  - *Target filters* — gene-level masks from `GENE_RESEARCH`: **DepMap
+    dependency** (Pan-essential / Selective / Non-essential / Other),
+    **Confidence** (High / Med / Low), **LoF benefit** (Yes / No / Maybe), and
+    **Validation** (a user-supplied validated/devalidated gene split, e.g.
+    "FBXO31 dependent" / "FBXO31 independent"). Each greys out genes whose
+    category is unticked; a `(no data)` bucket appears only when some plotted
+    gene lacks a value.
+  - Each group's **default ticked set** is configurable (`activity_defaults`,
+    `depmap_defaults`, `conf_defaults`, `lof_defaults`, `validation_defaults`,
+    …) so the view can open focused (e.g. Activity = Low + Single, DepMap =
+    Selective + Non-essential, Confidence = High + Med, LoF = Yes). `None` = all
+    ticked; `[]` = none. An empty group / section auto-hides.
 - **Compound panel** (top-right, click a dot to pin) — paginated 5/page
   (◀ ▶ / ←→), structure thumbnail + per-plate volcanoes; click a compound
-  to pin its volcano(s). Patents panel sits to its left.
+  to pin its volcano(s). Patents panel sits to its left. Each volcano's caption
+  shows the experiment's **MoleculeBatchID** (`SRB-XXXXXXX-NNN`, batch-specific)
+  rather than the bare compound id — supplied via an optional `molecule_batch_id`
+  column on `compounds_df` (falls back to the compound id when absent).
 - **Volcanoes** — `fn.plot_volcano_significant` colours **only significant
   targets** (up/down by logfc sign, rest grey; or **by biological function**
   via `gene_category=`, see below), keyed by `uniquecontrast`,
   `xlim=(-8, 8)`. Rendered as **interactive SVG** (`volcano_significant=True`):
   the dense ~8k-point cloud is rasterised; each significant point is a vector
   marker with a native `<title>` (gene name) → **hover shows the gene**, like
-  the 3D dots. Cached to `interfaces/volcanoes/<hash>.svg` and referenced via
+  the 3D dots. Cached to `<interfaces>/volcanoes_px/<hash>.svg` and referenced via
   `<object>` (tiny HTML, lazy-loaded, cached re-runs skip rendering).
 - **Control targets** (`control_genes`) — genes whose only significant
   compound(s) are control compounds (`control_compounds`, e.g. GAK →
   `SRB-0000692`) render as **grey diamonds** in a dedicated **"control"**
   legend entry, pulled out of their disease-area colour.
 - **Research box** (bottom-right, on hover) — formatted degradation research
-  for the gene from `RESEARCH_161_T_20260604`: confidence badge, LoF benefit,
+  for the gene from `GENE_RESEARCH`: confidence badge, LoF benefit,
   degrader rationale/feasibility, DepMap dependency, indications, safety,
   biology, source links.
+- **Invisible backdrop.** The grey "all genes" trace is rendered at
+  `opacity=0` (not removed): it stays in the scene so its full data extent
+  pins the 3D autorange, keeping the coloured dots anchored as the sliders
+  filter them — but nothing grey is drawn, and it's dropped from hover/legend.
 - **Axis legend** (bottom-left, above the sliders; auto-positioned via a
   `ResizeObserver`) — hover a row for the full explanation of each axis
   (overridable via `axis_help=`).
@@ -331,16 +361,93 @@ every *plottable* hit gene.
   `output/cell_signature/compound_function_enrichment.parquet`.
 - `_volcano_svg_string(...)` — interactive SVG volcano (rasterised cloud +
   vector significant points with `<title>` tooltips).
+- `_volcano_cache_fname(gene, key, xlim, size_px, ext)` — the single source of
+  truth for the volcano disk-cache filename (content-independent hash of
+  identity + render params), used by both `plot_3d_interface` and
+  `recompute_volcanoes`.
+- `recompute_volcanoes(volcano_source, pairs, volcano_dir, *, volcano_key,
+  significant, xlim, size_px, n_jobs)` — re-render a specific set of
+  `(gene, key)` volcanoes to the cache dir, overwriting in place. Needed after a
+  **data** change (the cache is keyed by identity, not values, so a plain re-run
+  would reuse stale images). Used by the **"Re-(Compute) Volcanoes"** cell, which
+  floors `pvalue == 0.0` to the smallest non-zero p-value (so a true zero plots
+  at its real `-log10` instead of the 1e-300 cap = 300) and re-renders only the
+  affected experiments; `plot_3d_interface` then picks them up as cache hits.
 
 **Outputs**
-- `DROPBOX_ML/interfaces/20260603_3d_interface_R2_assoc_ms.html` — the cockpit.
-- `DROPBOX_ML/interfaces/volcanoes/<hash>.svg` — cached per-(gene, experiment)
+- `GTLOCAL/interfaces/20260610_3d_interface_PX_R2_assoc_ms.html` (whole-Px) /
+  `DROPBOX_ML/interfaces/…_R2_assoc_ms.html` (FBX) — the cockpit, plus a deferred
+  `…_data.js` sidecar and a local `plotly.min.js` written alongside it.
+- `<interfaces>/volcanoes_px/<hash>.svg` — cached per-(gene, experiment)
   volcanoes (delete this folder to force a clean re-render after a data or
-  `xlim`/`size` change).
+  `xlim`/`size` change; or use `recompute_volcanoes` to refresh a subset).
 
 ---
 
-## 6. Building `data/srb_png/` — CDD Vault PNG export
+## 6. `MS_cytotox.ipynb` — cytotoxicity vs. cell-line gene expression
+
+Relates the compound **cytotoxicity** screen (viability across a panel of cancer
+cell lines) to **gene expression**, focused on FBXO31: do cell lines that express
+more FBXO31 get killed more, and can the transcriptome predict sensitivity?
+
+**Inputs**
+- Cytotox viability matrix — `sig` → `mat` (compounds × cell lines, **% viability**;
+  ~100 = no effect, **lower = more killing**). A pan-killer compound is dropped
+  before per-cell-line aggregation.
+- `expr` — `output/cytotox/expr_ourlines.parquet`, DepMap **24Q4** expression for
+  our 61 lines (× ~19,193 protein-coding genes). **Unit: `log2(TPM + 1)`** (min 0,
+  no negatives, ~16% exact zeros). Rough bins: TPM ≥ 1 = expressed
+  (`log2 ≥ 1`); EMBL-EBI/MGI low 0.5–10 / medium 11–1000 / high >1000 TPM
+  → `log2(TPM+1)` ≈ 0.6–3.5 / 3.6–10 / >10.
+- DepMap cell-line annotations (`cinfo`: lineage, primary disease) for the
+  clustering/heatmap tracks.
+
+**Flow**
+- Hierarchical clustering + heatmaps of viability (per-compound z-scores; blood
+  vs solid; DepMap disease tracks); structural-similarity (Mantel) and GDSC
+  mechanism-nomination side analyses.
+- **Sensitivity split** — per-cell-line sensitivity = mean % killing across
+  compounds; **tertile split** into `sensitive` / `resistant` (ambiguous middle
+  dropped).
+- **FBXO31 analyses** — violin (FBXO31 expression, sensitive vs resistant, one-sided
+  Mann-Whitney), scatter (mean viability *or* sensitivity vs FBXO31 with trend
+  line, Spearman + Pearson, most-extreme cell lines labelled), and a **per-compound
+  correlation table** (`corr_by_compound`: per-compound Pearson r of viability vs
+  FBXO31 across shared lines, + BH-FDR via `scipy.stats.false_discovery_control`).
+- **Expression heatmap** — square-cell heatmap of N selected genes × cell lines,
+  coloured by expression (slide figure).
+- **ML feature matrix** — DepMap expression genes (top-variance) for the labelled
+  lines, with three knobs: `COMPOUNDS` (which compounds' mean killing defines
+  sensitivity), `FBXO31_MIN` (keep only lines expressing FBXO31 above a
+  `log2(TPM+1)` floor), and `SPLIT_FRAC` (extreme top/bottom fraction kept).
+
+**Module** [`python/cytotox_plots.py`](../python/cytotox_plots.py) — keeps the
+notebook cells thin; all functions smoke-tested headless:
+- `cell_sensitivity(mat, compounds=None)` — per-cell-line mean % killing
+  (`100 - viability`) over a chosen compound set.
+- `sensitivity_labels(mat, compounds=None, *, method='tertile'|'median', frac=1/3)`
+  — discretise sensitivity into `sensitive`/`resistant`. `tertile` keeps the top
+  and bottom `frac` (1/3 = tertiles, 0.25 = quartiles, smaller = more extreme),
+  dropping the middle; `median` keeps everyone. `compounds=None, frac=1/3`
+  reproduces the notebook's global `label`.
+- `plot_cytotox_vs_expression(mat, expr, gene='FBXO31', *, metric='viability'|'sensitivity',
+  compounds=None, group_label=None, n_label=6, expr_unit='log2(TPM + 1)', …)` —
+  scatter of a per-cell-line cytotox metric (averaged over a chosen compound set)
+  vs a gene's expression, with trend line, Spearman/Pearson, and the most extreme
+  cell lines annotated.
+- `plot_gene_expression_heatmap(expr, genes, cells=None, *, group_label=None,
+  cmap='viridis', center=None, square=True, standardize=False,
+  expr_unit='log2(TPM + 1)', …)` — genes × cell-lines expression heatmap. With
+  `group_label` it orders/colours columns by group; otherwise columns follow the
+  caller's order (e.g. ranked by FBXO31). `standardize` z-scores each gene (good
+  for many genes); `center` aligns a diverging cmap's midpoint.
+
+**Outputs** — figures only (no persisted artifacts); `expr_ourlines.parquet` is a
+prebuilt input.
+
+---
+
+## 7. Building `data/srb_png/` — CDD Vault PNG export
 
 `MS_TargetML.ipynb`'s 3D prioritisation viz (cell 33) prefers
 pre-rendered structure thumbnails from `data/srb_png/<compound>.png`
@@ -425,7 +532,7 @@ new PNGs automatically on next render.
 
 ---
 
-## 7. Unit tests
+## 8. Unit tests
 
 The unit tests for the shared helpers (`Statistics_tools.check_ML_data`,
 `Rdkit_tools.write_filtered_enum_sdf`, …) live next to the modules they
@@ -474,6 +581,9 @@ R²: `MS_ML_Prioritization` scores new compounds with the trained models,
 and `MS_Interface` joins it with the FBX MS/disease scores into an
 interactive 3D browser. Compound-level exploratory modelling is
 orthogonal — same underlying features, different prediction target.
+`MS_cytotox` is orthogonal too: it pairs a separate cell-line **cytotoxicity**
+screen with **DepMap expression** (not the SAR features) to ask whether
+expression — FBXO31 in particular — tracks compound sensitivity.
 
 ## Related docs
 

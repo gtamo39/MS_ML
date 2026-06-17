@@ -102,6 +102,7 @@ If a tool would meaningfully accelerate the work but only runs as a hosted API, 
 
 - **Read before writing** — always read a file before editing it
 - **Check for existing patterns** — match the style already in the codebase
+- **Keep comments to 1 line** — 2 lines max, and only if really necessary. Applies to inline/block comments (incl. notebook cell-top `##` comments); docstrings are exempt.
 - **Encapsulate state properly** — use classes or function parameters instead of global variables
 - **Update docs when changing code** — keep documentation in sync
 - **Break complex tasks into a todo list** — write out the steps, get approval, then execute
