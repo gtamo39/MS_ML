@@ -5,6 +5,32 @@ preferences. Claude Code should follow these when assisting on any project.
 
 ---
 
+## Project Wiki — read this first
+
+**At the start of every session, read `wiki/wiki.md`** — the durable, aggregate memory of this
+repo (where we are, what we've concluded, decisions/conventions, where things live). It survives
+context compaction and new sessions; use it to pick up exactly where we left off instead of
+re-deriving state from the notebook. **One wiki per repository:** `wiki/wiki.md`.
+
+**Claude updates it autonomously (then notes it in one line), incrementally, so it's always
+current** — that, not a last-second flush, is what survives compaction. **Never ask permission
+to update the wiki — just do it and give the one-line notice.** Triggers:
+
+- A **finding settles** — an analysis reaches a conclusion worth remembering next session.
+- A **decision/definition is made or changed** — a parameter, cohort definition, approach, naming, pivot.
+- A **reusable artifact stabilizes** — a new `functions.py` helper, a config knob, a notebook section moved to `.py`.
+- On **session wind-down**, do a reconcile pass; update on **explicit request** ("update the wiki").
+
+Do **not** update on every message / edit / intermediate run / exploratory question — record
+*settled* state, not the play-by-play.
+
+When writing: **reconcile, don't blindly append** (fix anything new results contradicted); add the
+**date + provenance** (cell id / output file / config key); **aggregate only** — findings, counts,
+gene names, gene-sets, metrics — **never** SMILES / compound IDs / per-compound values; then give a
+**one-line notice**.
+
+---
+
 ## Development Workflow
 
 ### 1. Prototype in Jupyter, then move to Python
@@ -102,6 +128,7 @@ If a tool would meaningfully accelerate the work but only runs as a hosted API, 
 
 - **Read before writing** — always read a file before editing it
 - **Check for existing patterns** — match the style already in the codebase
+- **Write simplified code** — the fewest clear statements: inline single-use intermediates, derive lists directly, collapse verbose literals; no redundant variables or steps. Simplify before reporting done — readability first (simple ≠ cryptic one-liner).
 - **Keep comments to 1 line** — 2 lines max, and only if really necessary. Applies to inline/block comments (incl. notebook cell-top `##` comments); docstrings are exempt.
 - **Encapsulate state properly** — use classes or function parameters instead of global variables
 - **Update docs when changing code** — keep documentation in sync

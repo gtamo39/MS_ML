@@ -1265,6 +1265,23 @@ _INTERFACE_INJECT = '''
                                     column-gap: 14px; }
   #filter-panel label { display: block; padding: 1px 0; cursor: pointer; white-space: nowrap; }
   #filter-panel input { margin-right: 5px; vertical-align: middle; }
+  /* Display section: 2D / 3D pill toggle */
+  #filter-panel .disp-row { display: flex; align-items: center; gap: 10px; padding: 2px 0 4px; }
+  #filter-panel .disp-label { font-weight: 600; color: #1D3557; }
+  #filter-panel .disp-toggle { display: inline-flex; cursor: pointer; user-select: none;
+                               border: 1px solid #bbb; border-radius: 999px; overflow: hidden;
+                               font-weight: 700; font-size: 10px; }
+  #filter-panel .disp-toggle .seg { padding: 2px 11px; color: #888; background: #f0f0f0;
+                                    transition: background .12s, color .12s; }
+  #filter-panel .disp-toggle .seg.active { color: #fff; background: #1D3557; }
+  /* Plates nested by date: collapsible sub-block per date inside the Plates group. */
+  #filter-panel .pf-date + .pf-date { margin-top: 4px; }
+  #filter-panel .pf-date-head { cursor: pointer; font-weight: 600; color: #1D3557;
+                                padding: 2px 0; white-space: nowrap; }
+  #filter-panel .pf-date-head .pf-date-n { color: #888; font-weight: 400; font-size: 10px; }
+  #filter-panel .pf-date.collapsed .pf-date-boxes { display: none; }
+  #filter-panel .pf-date.collapsed .fp-caret { transform: rotate(-90deg); }
+  #filter-panel .pf-date-boxes { padding-left: 12px; }
   #hover-patents {
     position: fixed; top: 12px; right: 660px; z-index: 9999;
     background: white; border: 1px solid #bbb; border-radius: 6px;
@@ -1353,7 +1370,16 @@ _INTERFACE_INJECT = '''
   #range-panel .rp-reset:hover { text-decoration: underline; }
 </style>
 <div id="filter-panel">
-  <div class="fp-section" id="sec-compound">Compound filters</div>
+  <div class="fp-section" id="sec-display">Display</div>
+  <div class="fp-group" id="display-group">
+    <div class="disp-row">
+      <span class="disp-label">Axes</span>
+      <span class="disp-toggle" id="disp-toggle" role="switch" title="3D = SAR predictability × association × MS score; 2D = a flat association × MS view (SAR axis hidden; SAR range slider still filters).">
+        <span class="seg seg2d" data-mode="2D">2D</span><span class="seg seg3d active" data-mode="3D">3D</span>
+      </span>
+    </div>
+  </div>
+  <div class="fp-section fp-sec2" id="sec-compound">Compound filters</div>
   <div class="fp-group collapsed" id="plate-group">
     <div class="pf-head" title="Show only experiments run on the ticked assay plates; a gene greys out when none of its compounds were measured on a ticked plate."><span class="fp-caret">&#9662;</span>Plates <span id="pf-all">all</span> / <span id="pf-none">none</span></div>
     <div id="pf-boxes" class="fp-boxes pf-2col"></div>
@@ -1548,6 +1574,35 @@ _INTERFACE_INJECT = '''
       sp.querySelector('.lab').textContent = axis[k] || '';
       legEl.appendChild(sp);
     });
+
+    // --- Display: 2D / 3D toggle. 2D = orthographic camera down the SAR (x) axis so only
+    // association (y) × MS (z) show; x-axis hidden, rotation locked. Same Scatter3d traces,
+    // so every filter / slider / pin / hover interaction is untouched. SAR slider still filters.
+    (function () {
+      var tg = document.getElementById("disp-toggle");
+      if (!tg || !gd || typeof Plotly === "undefined") return;
+      var CAM3D = {eye: {x: 1.25, y: 1.25, z: 1.25}, up: {x: 0, y: 0, z: 1},
+                   center: {x: 0, y: 0, z: 0}, projection: {type: "perspective"}};
+      var CAM2D = {eye: {x: 2.5, y: 0, z: 0}, up: {x: 0, y: 0, z: 1},
+                   center: {x: 0, y: 0, z: 0}, projection: {type: "orthographic"}};
+      function setMode(two) {
+        tg.querySelector(".seg2d").classList.toggle("active", two);
+        tg.querySelector(".seg3d").classList.toggle("active", !two);
+        Plotly.relayout(gd, {
+          "scene.camera": two ? CAM2D : CAM3D,
+          "scene.xaxis.visible": !two,
+          "scene.dragmode": two ? false : "turntable",
+          // 2D: a centred, squarer scene domain so the flattened plot sits mid-page
+          // (the full-width domain parks the orthographic projection bottom-right).
+          "scene.domain": two ? {x: [0.18, 0.72], y: [0.05, 0.97]} : {x: [0, 1], y: [0, 1]}
+        });
+      }
+      tg.addEventListener("click", function (e) {
+        var seg = e.target.closest(".seg");
+        setMode(seg ? seg.getAttribute("data-mode") === "2D"
+                    : !tg.querySelector(".seg2d").classList.contains("active"));
+      });
+    })();
 
     var pinned = false;
     var currentGene = "";
@@ -1921,7 +1976,75 @@ _INTERFACE_INJECT = '''
       document.getElementById(noneId).addEventListener("click", function(e) { e.stopPropagation(); setAll(false); });
       return true;
     }
-    var hasPlateG = buildGroup(plates, ticked, pfBoxes, "pf-all", "pf-none");
+    // Plates grouped into collapsible per-date sub-blocks (a "nested dropdown" by
+    // date) when __PLATE_DATES__ is supplied; otherwise the plain flat list. Each
+    // date carries a tri-state parent checkbox toggling all its plates at once.
+    function buildPlateGroup(items, dates, tickedMap, boxesEl, allId, noneId) {
+      if (!items.length) { if (boxesEl.parentNode) boxesEl.parentNode.style.display = "none"; return false; }
+      if (!dates || !Object.keys(dates).length)
+        return buildGroup(items, tickedMap, boxesEl, allId, noneId);  // flat fallback
+      var byDate = {}, order = [];
+      items.forEach(function(p) {
+        var d = dates[p] || "(no date)";
+        if (!byDate[d]) { byDate[d] = []; order.push(d); }
+        byDate[d].push(p);
+      });
+      order.sort(function(a, b) {                       // real dates ascending, "(no date)" last
+        if (a === "(no date)") return 1;
+        if (b === "(no date)") return -1;
+        return a < b ? -1 : (a > b ? 1 : 0);
+      });
+      boxesEl.classList.remove("pf-2col");              // each date sub-block owns its 2-col grid
+      var html = "";
+      order.forEach(function(d) {
+        html += '<div class="pf-date collapsed"><div class="pf-date-head"><span class="fp-caret">&#9662;</span>'
+              + '<input type="checkbox" class="pf-date-all" checked>' + d
+              + ' <span class="pf-date-n">(' + byDate[d].length + ')</span></div>'
+              + '<div class="pf-date-boxes pf-2col">';
+        byDate[d].forEach(function(p) {
+          html += '<label><input type="checkbox" value="' + p + '"'
+                + (tickedMap[p] ? ' checked' : '') + '>' + p + '</label>';
+        });
+        html += '</div></div>';
+      });
+      boxesEl.innerHTML = html;
+      function syncParent(dateEl) {
+        var cbs = dateEl.querySelectorAll(".pf-date-boxes input"), on = 0;
+        for (var i = 0; i < cbs.length; i++) if (cbs[i].checked) on++;
+        var par = dateEl.querySelector(".pf-date-all");
+        par.checked = on === cbs.length;
+        par.indeterminate = on > 0 && on < cbs.length;
+      }
+      var blocks = boxesEl.querySelectorAll(".pf-date");
+      for (var i = 0; i < blocks.length; i++) syncParent(blocks[i]);
+      boxesEl.addEventListener("change", function(e) {
+        var t = e.target; if (!t || t.type !== "checkbox") return;
+        if (t.classList.contains("pf-date-all")) {      // parent toggles all plates in its date
+          var box = t.closest(".pf-date").querySelectorAll(".pf-date-boxes input");
+          for (var j = 0; j < box.length; j++) { box[j].checked = t.checked; tickedMap[box[j].value] = t.checked; }
+          t.indeterminate = false;
+        } else {
+          tickedMap[t.value] = t.checked;
+          syncParent(t.closest(".pf-date"));
+        }
+        page = 0; recolor3d(); if (pinned) renderPage();
+      });
+      boxesEl.addEventListener("click", function(e) {   // caret/header collapses the date's plate list
+        if (e.target.type === "checkbox") return;       // let the parent checkbox toggle instead
+        var head = e.target.closest(".pf-date-head");
+        if (head) head.parentNode.classList.toggle("collapsed");
+      });
+      function setAll(v) {
+        items.forEach(function(it) { tickedMap[it] = v; });
+        var cbs = boxesEl.querySelectorAll("input[type=checkbox]");
+        for (var i = 0; i < cbs.length; i++) { cbs[i].checked = v; cbs[i].indeterminate = false; }
+        page = 0; recolor3d(); if (pinned) renderPage();
+      }
+      document.getElementById(allId).addEventListener("click", function(e) { e.stopPropagation(); setAll(true); });
+      document.getElementById(noneId).addEventListener("click", function(e) { e.stopPropagation(); setAll(false); });
+      return true;
+    }
+    var hasPlateG = buildPlateGroup(plates, window.__PLATE_DATES__ || null, ticked, pfBoxes, "pf-all", "pf-none");
     var hasActG   = buildGroup(activities, tickedAct, afBoxes, "af-all", "af-none");
     // "Compound" group: one tickbox per compound class (Controls, Contaminants).
     // Unticking a class removes its compounds from every gene (panel, volcanoes, gene
@@ -1966,7 +2089,7 @@ _INTERFACE_INJECT = '''
     if (_secC) _secC.style.display = (hasPlateG || hasActG || _hasCtrl || _hasCont) ? "" : "none";
     var _secT = document.getElementById("sec-target");
     if (_secT) _secT.style.display = (hasDepG || hasConfG || hasLofG || hasValG) ? "" : "none";
-    if (hasPlateG || hasActG || _hasCtrl || _hasCont || hasDepG || hasConfG || hasLofG || hasValG) pf.style.display = "block";
+    pf.style.display = "block";   // always shown — the Display (2D/3D) section is always present
     // clicking a group header (not the all/none spans) collapses/expands its boxes
     var _heads = document.querySelectorAll("#filter-panel .pf-head");
     for (var _h = 0; _h < _heads.length; _h++) {
@@ -2576,6 +2699,9 @@ def plot_3d_interface(
     min_y_auto=None,
     top_n_hover=5,
     compounds_df=None,
+    plate_dates=None,
+    panels=None,
+    return_panels=False,
     volcano_source=None,
     volcano_key='uniquecontrast',
     page_size=5,
@@ -2786,7 +2912,19 @@ def plot_3d_interface(
     # __VOLCANO_BASE__ and store only the per-row filename in the compound blob
     # (prefix × 23k rows was ~2 MB). '' ⇒ embedded mode, JS prepends nothing.
     _volcano_base = ''
-    if have_compounds:
+    # Precomputed panels (compound blobs + plate/activity lists + thumb/volcano modes) can be
+    # passed in to SKIP the expensive build below — the referenced thumbnail/volcano files must
+    # already exist on disk (written by the run that produced the panels). Cache via return_panels.
+    if have_compounds and panels is not None:
+        custom         = panels['custom']
+        all_plates     = panels['all_plates']
+        all_activities = panels['all_activities']
+        _volcano_base  = panels['volcano_base']
+        _thumb_ext     = bool(panels['thumb_ext'])
+        _thumb_rel     = panels['thumb_rel']
+        print(f'> panels: loaded {len(custom):,} gene panels from cache (skipped rebuild)')
+
+    if have_compounds and panels is None:
         _stats = {'png': 0, 'rdkit': 0, 'miss': 0}
 
         # thumbnail mode: 'path' references PNGs copied next to the HTML (lazy <img>,
@@ -3059,11 +3197,15 @@ def plot_3d_interface(
                 def _vfname(g, vk):
                     return _volcano_cache_fname(g, vk, volcano_xlim, volcano_size_px, _ext)
 
-                # cache hits: file already on disk -> reference it, skip render
+                # cache hits: file already on disk -> reference it, skip render. List the
+                # dir ONCE and test membership in memory — an os.path.exists per task is
+                # ~26k stat calls, painfully slow on a Dropbox/networked mount (/mnt/c).
+                _existing = set(os.listdir(volcano_dir))
                 render = []
-                for (g, vk, ei, pi) in tasks:
+                for (g, vk, ei, pi) in tqdm(tasks, desc='volcano cache scan',
+                                            unit='task', mininterval=0.5):
                     fn_ = _vfname(g, vk)
-                    if os.path.exists(os.path.join(volcano_dir, fn_)):
+                    if fn_ in _existing:
                         _set_volcano(g, ei, pi, fn_)   # base prepended client-side
                     else:
                         render.append((g, vk, ei, pi, fn_))
@@ -3167,6 +3309,12 @@ def plot_3d_interface(
     else:
         print('> no compound panel (provide compounds_df or top1..topN columns) — '
               'scatter + hover text only')
+
+    # bundle the (built or loaded) panel data so callers can cache + replay it (return_panels)
+    _panels_out = ({'custom': custom, 'all_plates': list(all_plates),
+                    'all_activities': list(all_activities), 'volcano_base': _volcano_base,
+                    'thumb_ext': bool(_thumb_ext), 'thumb_rel': _thumb_rel}
+                   if have_compounds else None)
 
     # 4) build figure
     def _hover_text(d):
@@ -3449,12 +3597,18 @@ def plot_3d_interface(
         # A <script defer src> (not fetch) is used deliberately: the HTML is opened
         # via file:// double-click, where fetch() of a local file is CORS-blocked but
         # a same-folder external script loads fine.
+        # plate -> date (string) for the nested-by-date Plates filter; only the plates
+        # actually present in the panel, undated ones omitted (JS buckets them as "(no date)").
+        _plate_dates_map = ({str(p): str(plate_dates[p]) for p in all_plates
+                             if plate_dates.get(p) is not None}
+                            if plate_dates else {})
         data_js = (
             'window.__GENE_COMPOUNDS__ = ' + _jsp(custom if have_compounds else {}) + ';\n'
             'window.__GENE_PATENTS__ = ' + _jsp(gene_patents_map) + ';\n'
             'window.__DEPMAP_URL__ = ' + _json.dumps(depmap_url_template) + ';\n'
             'window.__PAGE_SIZE__ = ' + str(int(page_size)) + ';\n'
             'window.__PLATES__ = ' + _jsp(list(all_plates)) + ';\n'
+            'window.__PLATE_DATES__ = ' + _jsp(_plate_dates_map) + ';\n'
             'window.__ACTIVITIES__ = ' + _jsp(list(all_activities)) + ';\n'
             'window.__ACTIVITY_DEFAULTS__ = ' + (_jsp(_act_def) if _act_def else 'null') + ';\n'
             'window.__CONTROL_COMPOUNDS__ = ' + _jsp([str(c) for c in (control_compounds or [])]) + ';\n'
@@ -3504,6 +3658,8 @@ def plot_3d_interface(
     if nb_display:
         fig.show()
 
+    if return_panels:
+        return fig, highlighted, _panels_out
     return fig, highlighted
 
 
@@ -4780,6 +4936,60 @@ def recompute_volcanoes(volcano_source, pairs, volcano_dir, *,
           f'(of {len(pairs):,} requested) -> {volcano_dir}')
     return {'requested': len(pairs), 'written': written, 'skipped': skipped,
             'dir': volcano_dir}
+
+
+def floor_zero_pvalues_and_refresh_volcanoes(measure, volcano_dir, *,
+                                             drop_plates=(), volcano_key='uniquecontrast',
+                                             xlim=(-8.0, 8.0), size_px=350, n_jobs=1,
+                                             floor_inplace=True):
+    """
+    Floor 0.0 p-values to the smallest non-zero p-value and refresh ONLY the cached
+    volcanoes of experiments that had >=1 floored target.
+
+    A p-value of 0.0 -> +inf under -log10 and is clipped at 1e-300 by the renderers
+    (plots at y=300). Flooring zeros to ``pmin`` (smallest observed non-zero p) caps the
+    y-axis at ``-log10(pmin)`` instead. The volcano disk cache is keyed by identity +
+    render params (NOT data), so the affected images are overwritten explicitly via
+    :func:`recompute_volcanoes`; :func:`plot_3d_interface` then picks them up as cache
+    hits. This is a one-off cache-refresh utility: new experiments are rendered fresh
+    (and already floored) by the interface, so only run it when an EXISTING cached
+    experiment's p-values changed.
+
+    Crash-safe: renders from a floored COPY first; ``measure`` is floored in place (when
+    ``floor_inplace``) only AFTER the re-render succeeds, so a failed render leaves the
+    zeros intact and the call stays re-runnable.
+
+    :param DataFrame measure: per-(gene x experiment) table with ``pvalue``,
+        ``significant``, ``logfc``, ``plate``, ``genes`` and ``volcano_key`` columns.
+    :param str volcano_dir: cache directory whose images are overwritten — MUST match the
+        ``plot_3d_interface`` ``volcano_dir``/``xlim``/``size_px`` or filenames won't align.
+    :param drop_plates: noisy plates excluded before rendering (as in the interface build).
+    :param bool floor_inplace: floor ``measure`` in place after a successful re-render.
+    :return dict: ``{'n_floored', 'n_experiments', 'pmin', 'n_pairs', 'stats'}``;
+        ``stats`` is ``None`` (and ``pmin`` is ``None``) when there were no zeros to floor.
+    """
+    was_zero = measure['pvalue'].eq(0.0)
+    if not was_zero.any():
+        return {'n_floored': 0, 'n_experiments': 0, 'pmin': None, 'n_pairs': 0, 'stats': None}
+    pmin = measure.loc[measure['pvalue'] > 0, 'pvalue'].min()
+    assert pd.notna(pmin), 'no non-zero p-values to floor to'
+    affected = set(measure.loc[was_zero, volcano_key].unique())
+
+    # render from a FLOORED COPY (don't touch `measure` yet); same plate-drop + significant-
+    # down-hit rule the interface uses, restricted to the experiments that had a floored target.
+    meas = measure[~measure['plate'].isin(list(drop_plates))].copy()
+    meas.loc[meas['pvalue'].eq(0.0), 'pvalue'] = pmin
+    pairs = (meas[(meas['significant'] == 1) & (meas['logfc'] < 0)
+                  & meas[volcano_key].isin(affected)]
+             [['genes', volcano_key]].dropna().drop_duplicates())
+    stats = recompute_volcanoes(
+        meas, pairs.itertuples(index=False, name=None), volcano_dir,
+        volcano_key=volcano_key, significant=True, xlim=xlim, size_px=size_px, n_jobs=n_jobs)
+
+    if floor_inplace:   # re-render succeeded -> match `measure` to the regenerated images
+        measure.loc[was_zero, 'pvalue'] = pmin
+    return {'n_floored': int(was_zero.sum()), 'n_experiments': len(affected),
+            'pmin': float(pmin), 'n_pairs': len(pairs), 'stats': stats}
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

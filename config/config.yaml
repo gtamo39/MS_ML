@@ -23,6 +23,14 @@ PX_20260529_CDDVAULT: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_
 PX_20260529_DB: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/Daniela/20260529_FBXOscreening/20260529_Proteomics_Database_CSV_Export.csv
 PX_SCREEN_LIB: data/MS/20260513_CDD_FBXO31_PxScreen_Source.csv
 
+FBX_DIR: data/advanteidge
+FBX_BATCHES:                          # {} -> MEASURE / MSSCORE / REPORT; concatenated at load (disjoint uniquecontrast)
+- 20260601/20260601_FBX_{}.csv
+- 20260616/20260616_FBX_{}.csv
+- 20260616_2/20260616_FBX_{}_02.csv
+PLATE_DATE_OVERRIDES: {}              # plate -> 'YYYY-MM-DD' for plates absent from source exports
+                                      # (known date-less df_raw stragglers: Pw58, Pw60, Pw61, Pw62)
+
 ENAMINE_20260513: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/virtual libraries/enum_NAr-pyrimidine_Enamine 4.sdf
 CYTONM: AUC
 CYTODATA: data/cytotox/20260602_AUC_cytotox.csv
@@ -47,6 +55,9 @@ CHEMLIB_OVERWRITE: false
 DFRAW_OVERWRITE: false
 DFRAW_PATH: output/MS/df_raw.csv
 MS_PATH: output/MS/MS.csv
+
+IFACE_OVERWRITE: false                # true -> rebuild + save the interface inputs; false -> load them from IFACE_DIR + free RAM
+IFACE_DIR: output/interface            # iface_df / compounds_df / meas / plate2date checkpoint for the 3D interface
 
 # strong cell-signature cohort (func_enrich_all_sel): which compounds enter the
 # structure<->cell-state analysis (signature clustering + chemistry->class ML).
