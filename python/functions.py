@@ -2720,7 +2720,7 @@ def plot_3d_interface(
     depmap_url_template='https://depmap.org/portal/gene/{gene}',
     disease_area_colors=None,
     na_area_color='#bbbbbb',
-    title='SAR predictability × disease association × MS score',
+    title='',
     range_sliders=False,
     range_defaults=None,
     activity_defaults=None,
@@ -3468,7 +3468,7 @@ def plot_3d_interface(
             bgcolor='white',
         ),
         legend=dict(itemsizing='constant'),
-        margin=dict(l=0, r=0, b=0, t=40),
+        margin=dict(l=0, r=0, b=0, t=(40 if title else 10)),
     )
 
     # 5) optional standalone HTML with on-hover structure thumbnails
@@ -4915,11 +4915,29 @@ def recompute_volcanoes(volcano_source, pairs, volcano_dir, *,
         return (g, k, sub_cache.get(k, empty), size_px, xlim[0], xlim[1], sig)
 
     if n_jobs == 1:
-        contents = [_volcano_render_worker(_args(g, k)) for g, k in pairs]
+        contents = [_volcano_render_worker(_args(g, k))
+                    for g, k in tqdm(pairs, desc='recompute volcanoes', unit='vol', mininterval=0.5)]
     else:
+        import contextlib
+        import joblib as _joblib
         from joblib import Parallel, delayed
-        contents = Parallel(n_jobs=n_jobs, backend='loky')(
-            delayed(_volcano_render_worker)(_args(g, k)) for g, k in pairs)
+        # bridge joblib's per-batch completion callback to a tqdm bar
+        @contextlib.contextmanager
+        def _tqdm_joblib(pbar):
+            class _Cb(_joblib.parallel.BatchCompletionCallBack):
+                def __call__(self, *a, **kw):
+                    pbar.update(n=self.batch_size)
+                    return super().__call__(*a, **kw)
+            prev = _joblib.parallel.BatchCompletionCallBack
+            _joblib.parallel.BatchCompletionCallBack = _Cb
+            try:
+                yield pbar
+            finally:
+                _joblib.parallel.BatchCompletionCallBack = prev
+                pbar.close()
+        with _tqdm_joblib(tqdm(total=len(pairs), desc='recompute volcanoes', unit='vol', mininterval=0.5)):
+            contents = Parallel(n_jobs=n_jobs, backend='loky')(
+                delayed(_volcano_render_worker)(_args(g, k)) for g, k in pairs)
 
     written = skipped = 0
     for (g, k), content in zip(pairs, contents):

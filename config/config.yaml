@@ -28,8 +28,9 @@ FBX_BATCHES:                          # {} -> MEASURE / MSSCORE / REPORT; concat
 - 20260601/20260601_FBX_{}.csv
 - 20260616/20260616_FBX_{}.csv
 - 20260616_2/20260616_FBX_{}_02.csv
+- 20260617/20260617_FBX_{}.csv
 PLATE_DATE_OVERRIDES: {}              # plate -> 'YYYY-MM-DD' for plates absent from source exports
-                                      # (known date-less df_raw stragglers: Pw58, Pw60, Pw61, Pw62)
+                                      # (Pw58/60/61/62 now resolve via the 0520 DB export -> 2026-05-20)
 
 ENAMINE_20260513: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/virtual libraries/enum_NAr-pyrimidine_Enamine 4.sdf
 CYTONM: AUC
@@ -51,12 +52,12 @@ CM2RM:
 FEATURES_TYPE: prevalence
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
-CHEMLIB_OVERWRITE: false
+CHEMLIB_OVERWRITE: true
 DFRAW_OVERWRITE: false
 DFRAW_PATH: output/MS/df_raw.csv
 MS_PATH: output/MS/MS.csv
 
-IFACE_OVERWRITE: false                # true -> rebuild + save the interface inputs; false -> load them from IFACE_DIR + free RAM
+IFACE_OVERWRITE: true               # true -> rebuild + save the interface inputs; false -> load them from IFACE_DIR + free RAM
 IFACE_DIR: output/interface            # iface_df / compounds_df / meas / plate2date checkpoint for the 3D interface
 
 # strong cell-signature cohort (func_enrich_all_sel): which compounds enter the

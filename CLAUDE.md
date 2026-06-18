@@ -106,6 +106,8 @@ Operational rules for the assistant in this project:
 - **Don't echo** notebook outputs that render structure thumbnails, top-K SMILES tables, or per-compound logfc.
 - **Aggregate-only is fine**: gene names (HGNC is public), per-gene R² values, plate IDs, compound counts, model hyperparameters, code, configs.
 - **Public reference SMILES are fine** for unit tests: ethanol (`CCO`), benzene (`c1ccccc1`), aspirin, or anything from RDKit's example data.
+- **Schema-then-synthesize for testing**: to test code against a real file's *shape*, read only its schema — column names and dtypes (`pd.read_csv(path, nrows=0).columns`, `df.dtypes`) — never the values, then **generate synthetic data matching that schema** (random floats, fake `C_001`/`G_001` IDs, public SMILES like `CCO`) and run the test on the synthetic frame. This keeps real values off the wire while still exercising the code. Prefer this over reading rows.
+- **Run heavy diagnostics in the user's notebook, not in your own process**: when a check needs `df_raw`/`measure`/large exports, hand the user a snippet to run in the live kernel (frames already in memory) rather than loading the files yourself — avoids both the data crossing the wire and OOM-killing the machine.
 - If chemistry inspection is genuinely needed, ask the user to paste an *anonymised* summary (`C_001`, `G_001` with the mapping kept local), rather than reading the source file.
 
 This applies even with a Teams / Enterprise subscription. Zero-Data-Retention (ZDR) addenda reduce retention but don't eliminate the in-flight transit — the rule above is operational hygiene that's independent of which contract was signed.
