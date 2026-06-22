@@ -475,6 +475,96 @@ def collapse_ms_latest_measurement(MS, compound_col='compound', date_col='date',
     return out
 
 
+# Target schemas the FBX frames are coerced to (so a plain concat with the
+# existing df_raw / MS frames lines up).
+FBX_DFRAW_COLS = ['MoleculeBatchID', 'MSPlate', 'genes', 'pg', 'logfc', 'pvalue',
+                  'adjpval', 'significant', 'uniquecontrast', 'compound', 'batch']
+FBX_MS_COLS = ['compound', 'ndown', 'origin', 'activity', 'date']
+
+
+def load_fbx_tranche(tranche_dir, *, control_compounds=(), contaminants=(),
+                     drop_plate_substr=('MLN', 'KO', 'Eval'),
+                     dfraw_cols=FBX_DFRAW_COLS, ms_cols=FBX_MS_COLS, verbose=True):
+    """
+    Format one AdvantEdge / FBX export folder into the ``df_raw`` / ``MS`` schemas
+    so it can be ``pd.concat``-ed with the existing datasets. Returns
+    ``(df_raw_fbx, MS_fbx)``.
+
+    A tranche folder is named by its export date and holds three CSVs
+    (``*_FBX_MEASURE``, ``*_FBX_MSSCORE``, ``*_FBX_REPORT``); only MEASURE and
+    REPORT are used. The crosswalk mirrors ``MS_Interface``'s "combine df_raw &
+    FBX_MEASURE": MEASURE carries the per-(gene × experiment) signal keyed by
+    ``uniquecontrast``; REPORT maps ``uniquecontrast`` → ``srbnumber`` (the full
+    ``MoleculeBatchID``), which splits into ``compound`` (``SRB-XXXXXXX``) +
+    ``batch`` (``NNN``).
+
+    The glob tolerates a re-export suffix (``*_FBX_MEASURE_02.csv``); the date is
+    taken from the folder name's leading ``YYYYMMDD`` (so ``20260616_2`` parses to
+    2026-06-16) while ``origin`` keeps the full folder name to stay distinct.
+
+    :param str tranche_dir: one FBX export folder (named by export date).
+    :param control_compounds: control compound ids to drop entirely.
+    :param contaminants: contaminant compound ids to drop entirely.
+    :param drop_plate_substr: drop any plate whose name contains one of these
+        substrings (case-insensitive — e.g. MLN / KO / Eval conditions).
+    :param list dfraw_cols: target df_raw column order.
+    :param list ms_cols: target MS column order.
+    :param bool verbose: print aggregate diagnostics (counts) — no per-compound rows.
+    :return: ``(df_raw_fbx, MS_fbx)`` in the df_raw / MS schemas.
+    """
+    import glob as _glob
+    date = os.path.basename(tranche_dir.rstrip('/'))                 # folder, e.g. '20260616' or '20260616_2'
+    pick = lambda kind: _glob.glob(os.path.join(tranche_dir, f'*FBX_{kind}*.csv'))[0]
+    measure = pd.read_csv(pick('MEASURE'),                           # drop the unused 'id' col
+                          usecols=['pg', 'genes', 'uniquecontrast', 'logfc',
+                                   'pvalue', 'adjpval', 'significant', 'plate'])
+    report  = pd.read_csv(pick('REPORT'))
+
+    # drop unwanted plates (substring match on the plate name, case-insensitive)
+    _pat = '|'.join(drop_plate_substr)
+    _mpl = measure['plate'].astype(str)
+    _dropped = sorted(set(_mpl[_mpl.str.contains(_pat, case=False, na=False)]))
+    measure = measure[~_mpl.str.contains(_pat, case=False, na=False)]
+    report  = report[~report['plate'].astype(str).str.contains(_pat, case=False, na=False)]
+    if verbose and _dropped:
+        print(f'> {date}: dropped {len(_dropped)} plates matching {drop_plate_substr}: {_dropped}')
+
+    # control + contaminant compounds to drop entirely
+    _remove = set(map(str, control_compounds)) | set(map(str, contaminants))
+
+    # uniquecontrast -> srbnumber (MoleculeBatchID) -> compound + batch
+    rep = (report[['uniquecontrast', 'srbnumber']]
+           .dropna(subset=['srbnumber']).drop_duplicates('uniquecontrast'))
+    sp  = rep['srbnumber'].astype(str).str.split('-', n=2, expand=True)
+    rep = rep.assign(MoleculeBatchID=rep['srbnumber'], compound=sp[0] + '-' + sp[1], batch=sp[2])
+
+    # --- df_raw schema (per gene x experiment) ---
+    df_raw_fbx = (measure.merge(rep[['uniquecontrast', 'MoleculeBatchID', 'compound', 'batch']],
+                                on='uniquecontrast', how='left')
+                  .rename(columns={'plate': 'MSPlate'}))
+    n_qc = int(df_raw_fbx['MoleculeBatchID'].isna().sum())           # control/QC contrasts: no compound
+    df_raw_fbx = df_raw_fbx.dropna(subset=['MoleculeBatchID'])[dfraw_cols]
+    n_ctrl = int(df_raw_fbx['compound'].isin(_remove).sum())         # control + contaminant rows
+    df_raw_fbx = df_raw_fbx[~df_raw_fbx['compound'].isin(_remove)]
+
+    # --- MS schema (per-compound activity summary; representative = max nr_down) ---
+    rms = report.dropna(subset=['srbnumber']).copy()
+    s2  = rms['srbnumber'].astype(str).str.split('-', n=2, expand=True)
+    rms['compound'] = s2[0] + '-' + s2[1]
+    rms = rms[~rms['compound'].isin(_remove)]                        # drop controls + contaminants
+    MS_fbx = (rms.sort_values('nr_down', ascending=False).drop_duplicates('compound', keep='first')
+              .rename(columns={'nr_down': 'ndown'})
+              .assign(origin='MS' + date, date=pd.to_datetime(date[:8]))[ms_cols])
+
+    if verbose:
+        print(f'> {date}: df_raw_fbx {len(df_raw_fbx):,} rows '
+              f'({df_raw_fbx["compound"].nunique():,} compounds, '
+              f'{df_raw_fbx["uniquecontrast"].nunique():,} experiments; '
+              f'{n_qc:,} QC rows w/o compound + {n_ctrl:,} control/contaminant rows dropped) '
+              f'| MS_fbx {len(MS_fbx):,} compounds')
+    return df_raw_fbx, MS_fbx
+
+
 def plot_activity_rate_by_tranche(MS, date_col='date', activity_col='activity',
                                   silent_label='Silent', colors=None,
                                   annotate=True, ax=None, dpi=150):
@@ -1282,6 +1372,68 @@ _INTERFACE_INJECT = '''
   #filter-panel .pf-date.collapsed .pf-date-boxes { display: none; }
   #filter-panel .pf-date.collapsed .fp-caret { transform: rotate(-90deg); }
   #filter-panel .pf-date-boxes { padding-left: 12px; }
+  /* Gene search + pin overlay */
+  #gene-search-wrap { position: relative; display: flex; gap: 5px; }
+  #gene-search { flex: 1 1 auto; min-width: 0; padding: 3px 6px; font: 12px sans-serif;
+                 border: 1px solid #bbb; border-radius: 4px; }
+  #filter-panel .mode-btn { flex: 0 0 auto; padding: 3px 10px; font: 600 11px sans-serif; cursor: pointer;
+                color: #fff; background: #1D3557; border: none; border-radius: 4px; white-space: nowrap; }
+  #filter-panel .mode-btn:hover { background: #16324f; }
+  #select-btn.active { background: #ff8c00; }            /* pin mode = orange */
+  #select-btn.active:hover { background: #e67e00; }
+  #hide-btn.active { background: #d62828; }              /* hide mode = red */
+  #hide-btn.active:hover { background: #b81f1f; }
+  #gene-ac { position: absolute; top: 100%; left: 0; right: 0; z-index: 10001;
+             background: #fff; border: 1px solid #bbb; border-top: none; border-radius: 0 0 4px 4px;
+             max-height: 220px; overflow-y: auto; display: none; box-shadow: 0 3px 8px rgba(0,0,0,0.15); }
+  #gene-ac .ac-item { padding: 3px 8px; font: 12px sans-serif; cursor: pointer; }
+  #gene-ac .ac-item.active, #gene-ac .ac-item:hover { background: #e8eef6; }
+  #gene-ac .ac-empty { padding: 3px 8px; font: 12px sans-serif; color: #999; }
+  #gene-ac .ac-tag { font-size: 9px; color: #fff; background: #b8860b; border-radius: 3px; padding: 0 4px; }
+  /* click-to-select mode: target (crosshair) cursor over the plot + compound rows */
+  body.select-mode .plotly-graph-div, body.select-mode .plotly-graph-div canvas { cursor: crosshair !important; }
+  body.select-mode #ifx-row .cell { cursor: crosshair !important; }
+  #pinned-box { margin-top: 6px; display: none; }
+  #pinned-box .pin-hd { font-weight: 700; font-size: 11px; color: #1D3557; padding-bottom: 3px; }
+  #pinned-box #pin-clear { color: #888; font-weight: 400; cursor: pointer; }
+  #pinned-box #pin-clear:hover { text-decoration: underline; }
+  #pinned-box .pin-chip { display: inline-flex; align-items: center; gap: 4px; margin: 2px 3px 0 0;
+                          padding: 1px 4px 1px 7px; font: 11px sans-serif; background: #fff7d6;
+                          border: 1px solid #FFC400; border-radius: 10px; }
+  #pinned-box .pin-x { cursor: pointer; color: #b8860b; font-weight: 700; padding: 0 2px; }
+  #pinned-box .pin-x:hover { color: #1D3557; }
+  #pinned-box .pin-cmp { background: #eef2f8; border-color: #1D3557; }
+  #pinned-box .pin-n { color: #888; font-size: 10px; }
+  /* HIDE sub-block (mirror of pin, in red) */
+  #hide-search-wrap { position: relative; display: flex; gap: 5px; margin-top: 8px; }
+  #hide-search { flex: 1 1 auto; min-width: 0; padding: 3px 6px; font: 12px sans-serif;
+                 border: 1px solid #bbb; border-radius: 4px; }
+  #hide-ac { position: absolute; top: 100%; left: 0; right: 0; z-index: 10001;
+             background: #fff; border: 1px solid #bbb; border-top: none; border-radius: 0 0 4px 4px;
+             max-height: 220px; overflow-y: auto; display: none; box-shadow: 0 3px 8px rgba(0,0,0,0.15); }
+  #hide-ac .ac-item { padding: 3px 8px; font: 12px sans-serif; cursor: pointer; }
+  #hide-ac .ac-item.active, #hide-ac .ac-item:hover { background: #fdecec; }
+  #hide-ac .ac-empty { padding: 3px 8px; font: 12px sans-serif; color: #999; }
+  #hide-ac .ac-tag { font-size: 9px; color: #fff; background: #b8860b; border-radius: 3px; padding: 0 4px; }
+  /* click-to-hide mode: a 'no' (not-allowed) cursor over the plot + compound rows */
+  body.hide-mode .plotly-graph-div, body.hide-mode .plotly-graph-div canvas { cursor: not-allowed !important; }
+  body.hide-mode #ifx-row .cell { cursor: not-allowed !important; }
+  #hidden-box { margin-top: 6px; display: none; }
+  #hidden-box .pin-hd { font-weight: 700; font-size: 11px; color: #d62828; padding-bottom: 3px; }
+  #hidden-box #hide-clear { color: #888; font-weight: 400; cursor: pointer; }
+  #hidden-box #hide-clear:hover { text-decoration: underline; }
+  #hidden-box .hide-chip { display: inline-flex; align-items: center; gap: 4px; margin: 2px 3px 0 0;
+                           padding: 1px 4px 1px 7px; font: 11px sans-serif; background: #fdecec;
+                           border: 1px solid #d62828; border-radius: 10px; }
+  #hidden-box .pin-x { cursor: pointer; color: #d62828; font-weight: 700; padding: 0 2px; }
+  #hidden-box .pin-x:hover { color: #1D3557; }
+  #hidden-box .pin-n { color: #888; font-size: 10px; }
+  /* Download selection */
+  #sec-download { display: flex; align-items: center; justify-content: space-between; }
+  #dl-btn { padding: 2px 10px; font: 600 11px sans-serif; cursor: pointer; text-transform: none;
+            letter-spacing: 0; color: #fff; background: #1D3557; border: none; border-radius: 4px; }
+  #dl-btn:hover { background: #16324f; }
+  #dl-note { margin-top: 5px; font: 11px sans-serif; color: #2A9D8F; word-break: break-all; }
   #hover-patents {
     position: fixed; top: 12px; right: 660px; z-index: 9999;
     background: white; border: 1px solid #bbb; border-radius: 6px;
@@ -1370,7 +1522,22 @@ _INTERFACE_INJECT = '''
   #range-panel .rp-reset:hover { text-decoration: underline; }
 </style>
 <div id="filter-panel">
-  <div class="fp-section" id="sec-display">Display</div>
+  <div class="fp-section" id="sec-search">PIN/HIDE</div>
+  <div class="fp-group" id="search-group">
+    <div id="gene-search-wrap">
+      <input type="text" id="gene-search" placeholder="search to pin…" autocomplete="off" spellcheck="false">
+      <button id="select-btn" class="mode-btn" title="Pin mode — when on (orange), click a target dot or a compound row to pin it">Pin</button>
+      <div id="gene-ac"></div>
+    </div>
+    <div id="pinned-box"></div>
+    <div id="hide-search-wrap">
+      <input type="text" id="hide-search" placeholder="search to hide…" autocomplete="off" spellcheck="false">
+      <button id="hide-btn" class="mode-btn" title="Hide mode — when on (red), click a target dot or a compound row to hide it">Hide</button>
+      <div id="hide-ac"></div>
+    </div>
+    <div id="hidden-box"></div>
+  </div>
+  <div class="fp-section fp-sec2" id="sec-display">Display</div>
   <div class="fp-group" id="display-group">
     <div class="disp-row">
       <span class="disp-label">Axes</span>
@@ -1408,6 +1575,10 @@ _INTERFACE_INJECT = '''
   <div class="fp-group collapsed" id="validation-group" style="display:none">
     <div class="pf-head" title="Filter genes by FBXO31 validation status — experimentally dependent vs independent targets."><span class="fp-caret">&#9662;</span>Validation <span id="vf-all">all</span> / <span id="vf-none">none</span></div>
     <div id="vf-boxes" class="fp-boxes"></div>
+  </div>
+  <div class="fp-section fp-sec2" id="sec-download">Download selection<button id="dl-btn" title="Download the current selection (proteins + their compounds) as CSV">Save</button></div>
+  <div class="fp-group" id="download-group">
+    <div id="dl-note"></div>
   </div>
 </div>
 <div id="hover-img">
@@ -1499,6 +1670,7 @@ _INTERFACE_INJECT = '''
     var contaminantOn = (window.__CONTAMINANT_DEFAULT_ON__ !== false);
     // A compound is shown unless its class is toggled off (controls and/or contaminants).
     function cmpAllowed(t) {
+      if (isHiddenCompound(t[0])) return false;   // hidden compounds drop from count/export/panel
       if (!controlOn && controlCompounds[t[0]]) return false;
       if (!contaminantOn && contaminantCompounds[t[0]]) return false;
       return true;
@@ -1613,6 +1785,38 @@ _INTERFACE_INJECT = '''
     var page = 0;
     var volPinIdx = null;  // data-eidx of the compound whose volcano(s) are click-pinned
     var recolor3d = function() {};  // set by the slider block; re-applies gene colouring
+    // --- pin / hide state (search boxes + click-to-select) ---
+    var pinnedGenes = [];        // gene names pinned directly
+    var pinnedCompounds = [];    // compound ids pinned (each pins its target genes)
+    var hiddenGenes = [];        // gene names hidden directly (drop from the plot)
+    var hiddenCompounds = [];    // compound ids hidden (drop the compound only; its genes stay)
+    var _hiddenSet = {};         // cache: directly-hidden genes
+    var _hiddenCmpSet = {};      // cache: directly-hidden compound ids
+    function rebuildHidden() {
+      _hiddenSet = {};
+      hiddenGenes.forEach(function(g) { _hiddenSet[g] = 1; });
+      _hiddenCmpSet = {};
+      hiddenCompounds.forEach(function(c) { _hiddenCmpSet[c] = 1; });
+    }
+    function isHiddenGene(g) { return _hiddenSet[g] === 1; }
+    function isHiddenCompound(c) { return _hiddenCmpSet[c] === 1; }
+    // effective pinned-gene set = (directly-pinned ∪ pinned-compounds' targets) minus hidden
+    function effectivePinSet() {
+      var s = {}, cg = window.__COMPOUND_GENES__ || {}, xyz = window.__GENE_XYZ__ || {};
+      pinnedCompounds.forEach(function(c) {
+        (cg[c] || []).forEach(function(g) { if (xyz[g] && !isHiddenGene(g)) s[g] = 1; });
+      });
+      pinnedGenes.forEach(function(g) { if (!isHiddenGene(g)) s[g] = 1; });
+      return s;
+    }
+    var clickMode = "";                           // "", "pin", or "hide" (set in the pin/hide block)
+    var togglePinGene = function(g) {};           // assigned in the pin/hide block
+    var togglePinCompound = function(c) {};
+    var toggleHideGene = function(g) {};
+    var toggleHideCompound = function(c) {};
+    var refreshLabelsHook = function() {};        // set in the range block; rebuilds in-range labels
+    var updateCountHook = function() {};          // set in the range block; refreshes the protein/compound tally
+    var exportCSVHook = function() { return null; };  // set in the range block; builds the selection CSV
 
     // A gene is "active" under the current Plate + Activity ticks if it has at
     // least one compound whose plate AND activity are both ticked. Used to grey
@@ -1636,6 +1840,42 @@ _INTERFACE_INJECT = '''
         }
       }
       return false;
+    }
+
+    // Collect this gene's DISTINCT visible compound ids (passing class+plate+activity)
+    // into `out` (used as a set), so the range panel can total compounds across the
+    // in-range proteins without double-counting a compound that hits several genes.
+    function collectVisibleCompounds(gene, out) {
+      var arr = (window.__GENE_COMPOUNDS__ || {})[gene];
+      if (!arr) return;
+      for (var i = 0; i < arr.length; i++) {
+        var t = arr[i];
+        if (!t || t[0] === "__META__") continue;
+        if (entryVisible(t)) out[t[0]] = 1;
+      }
+    }
+
+    // Gather (Batch Molecule-Batch ID -> set of genes) for a gene's visible compounds,
+    // honouring class/plate/activity filters (mbid lives at plate-row index 5, falling
+    // back to the compound id). Feeds the Download-selection CSV.
+    function collectExport(gene, map) {
+      var arr = (window.__GENE_COMPOUNDS__ || {})[gene];
+      if (!arr) return;
+      for (var i = 0; i < arr.length; i++) {
+        var t = arr[i];
+        if (!t || t[0] === "__META__" || !cmpAllowed(t)) continue;
+        if (isPaged(t)) {
+          var vis = visPlates(t);   // plate-rows: [plate, logfc, volcano, activity, n_genes, mbid]
+          for (var j = 0; j < vis.length; j++) {
+            var pl = vis[j], bid = pl[5] || t[0], plate = pl[0] || "", act = pl[3] || "";
+            var key = JSON.stringify([bid, plate, act]);
+            (map[key] || (map[key] = {bid: bid, plate: plate, act: act, genes: {}})).genes[gene] = 1;
+          }
+        } else {
+          var k2 = JSON.stringify([t[0], "", ""]);
+          (map[k2] || (map[k2] = {bid: t[0], plate: "", act: "", genes: {}})).genes[gene] = 1;
+        }
+      }
     }
 
     // --- plate-aware helpers ---
@@ -1901,9 +2141,15 @@ _INTERFACE_INJECT = '''
       volBox.style.display = "none";
     });
     row.addEventListener("click", function(e) {
-      if (!pinned) return;
       var cell = e.target.closest(".cell");
       if (!cell) return;
+      if (clickMode) {                // click-to-select: a compound row toggles that compound's pin/hide
+        e.stopPropagation();
+        var _c = cell.getAttribute("data-cmp"), _m = clickMode;
+        setTimeout(function() { _m === "hide" ? toggleHideCompound(_c) : togglePinCompound(_c); }, 0);
+        return;
+      }
+      if (!pinned) return;
       e.stopPropagation();
       var idx = parseInt(cell.getAttribute("data-eidx"), 10);
       if (volPinIdx === idx) {        // click the same compound -> unpin
@@ -1928,7 +2174,13 @@ _INTERFACE_INJECT = '''
       if (researchBox) researchBox.style.display = "none";
     });
     gd.on("plotly_click", function(e) {
-      if (render(e.points && e.points[0])) {
+      var _p = e.points && e.points[0];
+      if (clickMode && _p) {      // click-to-select: a dot toggles its gene pin/hide
+        var _g = (_p.data && _p.data.text && _p.data.text[_p.pointNumber]) || _p.customdata || "";
+        var _m = clickMode;       // defer out of Plotly's click dispatch — redraw() re-entrant here hangs
+        if (_g) { setTimeout(function() { _m === "hide" ? toggleHideGene(_g) : togglePinGene(_g); }, 0); return; }
+      }
+      if (render(_p)) {
         pinned = true;
         box.classList.add("pinned");
         box.style.display = "block";
@@ -2133,25 +2385,73 @@ _INTERFACE_INJECT = '''
         });
       }
       var lastMasks = {}, lastTotal = 0;
+      // Range-panel tally: proteins + DISTINCT compounds currently SHOWN = in-range
+      // ∪ pinned (pins override range/filters), with each protein's compounds still
+      // gated by the class/plate/activity filters. Recomputed on filter change AND
+      // on pin/unpin (via updateCountHook), reusing the stashed lastMasks.
+      function updateCount() {
+        var cmpSet = {}, protSet = {};
+        R.areaTraces.forEach(function(ti) {
+          var o = orig[ti], m = lastMasks[ti]; if (!o || !m) return;
+          for (var k = 0; k < m.length; k++) if (m[k]) {
+            protSet[o.text[k]] = 1; collectVisibleCompounds(o.text[k], cmpSet);
+          }
+        });
+        Object.keys(effectivePinSet()).forEach(function(g) { protSet[g] = 1; collectVisibleCompounds(g, cmpSet); });
+        document.getElementById("rp-count").textContent =
+          Object.keys(protSet).length + " proteins — " + Object.keys(cmpSet).length + " compounds";
+      }
+      // Current selection (in-range ∪ pinned) as CSV: one row per Batch Molecule-Batch ID
+      // with the genes it hits joined by "; ". Returns {csv, nRows}.
+      function buildExportCSV() {
+        var map = {};
+        R.areaTraces.forEach(function(ti) {
+          var o = orig[ti], m = lastMasks[ti]; if (!o || !m) return;
+          for (var k = 0; k < m.length; k++) if (m[k]) collectExport(o.text[k], map);
+        });
+        Object.keys(effectivePinSet()).forEach(function(g) { collectExport(g, map); });
+        function cell(s) {
+          s = String(s == null ? "" : s);
+          return /[",\\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+        }
+        var keys = Object.keys(map).sort();
+        var lines = ["Batch Molecule-Batch ID,genes,Plate,Activity"];
+        keys.forEach(function(k) {
+          var r = map[k];
+          lines.push([cell(r.bid), cell(Object.keys(r.genes).sort().join("; ")),
+                      cell(r.plate), cell(r.act)].join(","));
+        });
+        return {csv: lines.join("\\n"), nRows: keys.length};
+      }
       // Build gene-name labels (scene.annotations) for in-range genes, but only for
-      // VISIBLE (legend-enabled) area traces, and capped to the labelMax most prominent
-      // (highest MS score). Constant-size SVG => no GPU depth-scaling. Capping instead of
-      // hide-all means widening the view keeps the top labels rather than clearing them
+      // VISIBLE (legend-enabled) area traces, and capped to labelMax labels sampled
+      // EVENLY across the MS-score range. Constant-size SVG => no GPU depth-scaling.
+      // Capping instead of hide-all means widening the view keeps the top labels rather than clearing them
       // (bug 1); skipping legendonly traces means toggling a disease area hides its
       // labels along with its dots (bug 2).
       function refreshLabels() {
-        var cand = [];
+        var cand = [], pinSet = effectivePinSet();
         R.areaTraces.forEach(function(ti) {
           var o = orig[ti], m = lastMasks[ti]; if (!o || !m) return;
           if (gd.data[ti] && gd.data[ti].visible === "legendonly") return;
-          for (var k = 0; k < m.length; k++) if (m[k]) {
-            cand.push({x: o.x[k], y: o.y[k], z: o.z[k], text: o.text[k]});
+          for (var k = 0; k < m.length; k++) if (m[k] && !pinSet[o.text[k]]) {
+            cand.push({x: o.x[k], y: o.y[k], z: o.z[k], text: o.text[k]});   // pinned genes label via the overlay trace
           }
         });
         if (R.labelMax !== undefined && cand.length > R.labelMax) {
-          cand.sort(function(a, b) { return b.z - a.z; });   // keep the highest-MS labels
-          cand = cand.slice(0, R.labelMax);
+          // Order by MS, then EVENLY sample across the range (stride) so labels spread
+          // over the whole cloud instead of all clustering in the high-MS corner.
+          cand.sort(function(a, b) { return b.z - a.z; });
+          var stride = cand.length / R.labelMax, picked = [];
+          for (var s = 0; s < cand.length && picked.length < R.labelMax; s += stride) {
+            picked.push(cand[Math.floor(s)]);
+          }
+          cand = picked;
         }
+        var _gx = window.__GENE_XYZ__ || {};   // pinned genes: always labelled (exempt from cap), same 11px font
+        Object.keys(pinSet).forEach(function(g) {
+          var c = _gx[g]; if (c) cand.push({x: c[0], y: c[1], z: c[2], text: g});
+        });
         Plotly.relayout(gd, {"scene.annotations": cand.map(function(c) {
           return {x: c.x, y: c.y, z: c.z, text: c.text, showarrow: false,
                   yshift: 9, font: {size: 11, color: "#000"}};
@@ -2183,7 +2483,8 @@ _INTERFACE_INJECT = '''
                    && depAllowed(o.text[k])
                    && confAllowed(o.text[k])
                    && lofAllowed(o.text[k])
-                   && valAllowed(o.text[k]);
+                   && valAllowed(o.text[k])
+                   && !isHiddenGene(o.text[k]);   // hidden genes/compound-targets drop from the view
             m.push(inr); if (inr) total++;
           }
           masks[ti] = m;
@@ -2208,9 +2509,12 @@ _INTERFACE_INJECT = '''
         lastMasks = masks; lastTotal = total;
         Plotly.redraw(gd);
         refreshLabels();
-        document.getElementById("rp-count").textContent = total + " in range";
+        updateCount();
       }
       recolor3d = applyRanges;   // let the Plate/Activity checkboxes re-colour too
+      refreshLabelsHook = refreshLabels;   // expose to the pin block (label dedup)
+      updateCountHook = updateCount;       // expose to the pin block (tally includes pins)
+      exportCSVHook = buildExportCSV;      // expose to the download block
       // Toggling a disease area in the legend changes trace visibility (plotly fires
       // plotly_restyle); re-derive labels so hidden areas drop their labels too.
       if (gd.on) gd.on("plotly_restyle", refreshLabels);
@@ -2241,6 +2545,246 @@ _INTERFACE_INJECT = '''
         else { captureOrig(); applyRanges(); }
       })(50);
     }
+
+    // --- gene search + pin overlay --------------------------------------------------
+    // A search box with substring autocomplete; pinning a gene shows it as a gold
+    // diamond on the dedicated overlay trace (window.__PIN_TRACE__) that no filter
+    // touches, so it stays visible regardless of sliders/ticks. Hovering it still
+    // opens the compound panel (customdata=gene), whose contents respect activity/plate.
+    (function() {
+      var PIN_TRACE = window.__PIN_TRACE__;
+      var ALL_GENES = window.__ALL_GENES__ || [];
+      var ALL_COMPOUNDS = window.__ALL_COMPOUNDS__ || [];
+      var GENE_XYZ  = window.__GENE_XYZ__ || {};
+      var GENE_COLOR = window.__GENE_COLOR__ || {};
+      var COMPOUND_GENES = window.__COMPOUND_GENES__ || {};
+      var searchEl = document.getElementById("gene-search");
+      var acEl     = document.getElementById("gene-ac");
+      var selBtn   = document.getElementById("select-btn");
+      var boxEl    = document.getElementById("pinned-box");
+      var hideEl    = document.getElementById("hide-search");
+      var hideAcEl  = document.getElementById("hide-ac");
+      var hideBtn   = document.getElementById("hide-btn");
+      var hideBoxEl = document.getElementById("hidden-box");
+      if (!searchEl || !boxEl || PIN_TRACE == null) return;
+
+      function redrawPins() {
+        var genes = Object.keys(effectivePinSet());
+        var xs = [], ys = [], zs = [], ts = [], cds = [], hov = [], cols = [];
+        genes.forEach(function(g) {
+          var c = GENE_XYZ[g]; if (!c) return;
+          xs.push(c[0]); ys.push(c[1]); zs.push(c[2]); ts.push(g); cds.push(g); hov.push(g);
+          cols.push(GENE_COLOR[g] || "#1D3557");   // colour by disease/pharma category
+        });
+        if (typeof Plotly !== "undefined" && gd.data && gd.data[PIN_TRACE]) {
+          var tr = gd.data[PIN_TRACE];
+          tr.x = xs; tr.y = ys; tr.z = zs; tr.text = ts; tr.customdata = cds; tr.hovertext = hov;
+          tr.marker.color = cols;
+          Plotly.redraw(gd);
+        }
+        refreshLabelsHook();   // pinned genes label via scene.annotations (dedup with range labels)
+        updateCountHook();     // pinned proteins + their compounds enter the tally
+      }
+      function nTargets(c) {
+        return (COMPOUND_GENES[c] || []).filter(function(g) { return GENE_XYZ[g]; }).length;
+      }
+      function renderBox() {
+        // hide supersedes pin in the chip list: a pinned item that's also hidden shows
+        // only in the Hidden box (it reappears here when unhidden — the pin is retained).
+        var gs = pinnedGenes.filter(function(g) { return hiddenGenes.indexOf(g) === -1; });
+        var cs = pinnedCompounds.filter(function(c) { return hiddenCompounds.indexOf(c) === -1; });
+        var total = gs.length + cs.length;
+        if (!total) { boxEl.style.display = "none"; boxEl.innerHTML = ""; return; }
+        boxEl.style.display = "block";
+        var h = '<div class="pin-hd">Pinned (' + total + ') <span id="pin-clear">clear</span></div>';
+        cs.forEach(function(c) {
+          h += '<span class="pin-chip pin-cmp">' + c + ' <span class="pin-n">(' + nTargets(c) + ')</span>'
+             + '<span class="pin-x" data-c="' + c + '">×</span></span>';
+        });
+        gs.forEach(function(g) {
+          h += '<span class="pin-chip">' + g + '<span class="pin-x" data-g="' + g + '">×</span></span>';
+        });
+        boxEl.innerHTML = h;
+      }
+      function pinGene(g) {
+        if (!g || !GENE_XYZ[g] || pinnedGenes.indexOf(g) !== -1) return;
+        pinnedGenes.push(g); redrawPins(); renderBox();
+      }
+      function unpinGene(g) {
+        var i = pinnedGenes.indexOf(g);
+        if (i >= 0) { pinnedGenes.splice(i, 1); redrawPins(); renderBox(); }
+      }
+      function pinCompound(c) {
+        if (!c || !COMPOUND_GENES[c] || pinnedCompounds.indexOf(c) !== -1) return;
+        pinnedCompounds.push(c); redrawPins(); renderBox();
+      }
+      function unpinCompound(c) {
+        var i = pinnedCompounds.indexOf(c);
+        if (i >= 0) { pinnedCompounds.splice(i, 1); redrawPins(); renderBox(); }
+      }
+      // expose toggles for click-to-pin (dot -> gene, panel row -> compound)
+      togglePinGene = function(g) {
+        if (!g) return;
+        if (pinnedGenes.indexOf(g) !== -1) unpinGene(g); else pinGene(g);
+      };
+      togglePinCompound = function(c) {
+        if (!c) return;
+        if (pinnedCompounds.indexOf(c) !== -1) unpinCompound(c); else pinCompound(c);
+      };
+      // --- HIDE: directly-hidden genes/compounds; recolor3d re-runs the mask (which now
+      // excludes hidden) so hidden dots vanish; redrawPins drops them from the overlay too.
+      function afterHideChange() {
+        rebuildHidden(); recolor3d(); redrawPins(); renderHideBox(); renderBox();
+        // re-render the open compound panel so a hidden compound's thumbnail drops live
+        if (box && box.style.display !== "none" && currentGene) renderPage();
+      }
+      function hideGene(g) {
+        if (!g || !GENE_XYZ[g] || hiddenGenes.indexOf(g) !== -1) return;
+        hiddenGenes.push(g); afterHideChange();
+      }
+      function unhideGene(g) {
+        var i = hiddenGenes.indexOf(g);
+        if (i >= 0) { hiddenGenes.splice(i, 1); afterHideChange(); }
+      }
+      function hideCompound(c) {
+        if (!c || !COMPOUND_GENES[c] || hiddenCompounds.indexOf(c) !== -1) return;
+        hiddenCompounds.push(c); afterHideChange();
+      }
+      function unhideCompound(c) {
+        var i = hiddenCompounds.indexOf(c);
+        if (i >= 0) { hiddenCompounds.splice(i, 1); afterHideChange(); }
+      }
+      toggleHideGene = function(g) {
+        if (!g) return;
+        if (hiddenGenes.indexOf(g) !== -1) unhideGene(g); else hideGene(g);
+      };
+      toggleHideCompound = function(c) {
+        if (!c) return;
+        if (hiddenCompounds.indexOf(c) !== -1) unhideCompound(c); else hideCompound(c);
+      };
+      function renderHideBox() {
+        var total = hiddenGenes.length + hiddenCompounds.length;
+        if (!total) { hideBoxEl.style.display = "none"; hideBoxEl.innerHTML = ""; return; }
+        hideBoxEl.style.display = "block";
+        var h = '<div class="pin-hd">Hidden (' + total + ') <span id="hide-clear">clear</span></div>';
+        hiddenCompounds.forEach(function(c) {
+          h += '<span class="pin-chip hide-chip">' + c + ' <span class="pin-n">(' + nTargets(c) + ')</span>'
+             + '<span class="pin-x" data-c="' + c + '">×</span></span>';
+        });
+        hiddenGenes.forEach(function(g) {
+          h += '<span class="pin-chip hide-chip">' + g + '<span class="pin-x" data-g="' + g + '">×</span></span>';
+        });
+        hideBoxEl.innerHTML = h;
+      }
+
+      // mutually-exclusive click modes: Pin (orange) / Hide (red)
+      function setMode(mode) {       // "", "pin", "hide"
+        clickMode = mode;
+        if (selBtn) selBtn.classList.toggle("active", mode === "pin");
+        if (hideBtn) hideBtn.classList.toggle("active", mode === "hide");
+        document.body.classList.toggle("select-mode", mode === "pin");
+        document.body.classList.toggle("hide-mode", mode === "hide");
+      }
+      if (selBtn) selBtn.addEventListener("click", function() { setMode(clickMode === "pin" ? "" : "pin"); });
+      if (hideBtn) hideBtn.addEventListener("click", function() { setMode(clickMode === "hide" ? "" : "hide"); });
+
+      function pinChoice(ch) { if (ch) { if (ch.t === "cmp") pinCompound(ch.v); else pinGene(ch.v); } }
+      function hideChoice(ch) { if (ch) { if (ch.t === "cmp") hideCompound(ch.v); else hideGene(ch.v); } }
+      function exactMatch(q) {
+        q = (q || "").trim().toUpperCase(); if (!q) return null;
+        for (var i = 0; i < ALL_GENES.length; i++)
+          if (ALL_GENES[i].toUpperCase() === q) return {v: ALL_GENES[i], t: "gene"};
+        for (var j = 0; j < ALL_COMPOUNDS.length; j++)
+          if (ALL_COMPOUNDS[j].toUpperCase() === q) return {v: ALL_COMPOUNDS[j], t: "cmp"};
+        return null;
+      }
+      // generic substring autocomplete over genes + compounds; onPick({v,t}) does the action
+      function wireSearch(inp, ac, onPick) {
+        var items = [], data = [], active = -1;
+        function hilite() { for (var i = 0; i < items.length; i++) items[i].className = "ac-item" + (i === active ? " active" : ""); }
+        function chosen() { if (active >= 0 && data[active]) return data[active]; return exactMatch(inp.value) || data[0] || null; }
+        function render() {
+          var q = (inp.value || "").trim().toUpperCase();
+          ac.innerHTML = ""; items = []; data = []; active = -1;
+          if (!q) { ac.style.display = "none"; return; }
+          var matches = [];
+          for (var i = 0; i < ALL_GENES.length && matches.length < 12; i++)
+            if (ALL_GENES[i].toUpperCase().indexOf(q) !== -1) matches.push({v: ALL_GENES[i], t: "gene"});
+          for (var j = 0; j < ALL_COMPOUNDS.length && matches.length < 12; j++)
+            if (ALL_COMPOUNDS[j].toUpperCase().indexOf(q) !== -1) matches.push({v: ALL_COMPOUNDS[j], t: "cmp"});
+          if (!matches.length) { ac.innerHTML = '<div class="ac-empty">no match</div>'; ac.style.display = "block"; return; }
+          matches.forEach(function(mm) {
+            var d = document.createElement("div"); d.className = "ac-item";
+            d.innerHTML = mm.v + (mm.t === "cmp" ? ' <span class="ac-tag">compound</span>' : '');
+            d.addEventListener("mousedown", function(e) { e.preventDefault(); onPick(mm); inp.value = ""; render(); });
+            ac.appendChild(d); items.push(d); data.push(mm);
+          });
+          ac.style.display = "block";
+        }
+        inp.addEventListener("input", render);
+        inp.addEventListener("keydown", function(e) {
+          if (e.key === "ArrowDown") { e.preventDefault(); active = Math.min(active + 1, items.length - 1); hilite(); }
+          else if (e.key === "ArrowUp") { e.preventDefault(); active = Math.max(active - 1, 0); hilite(); }
+          else if (e.key === "Enter") { e.preventDefault(); onPick(chosen()); inp.value = ""; render(); }
+          else if (e.key === "Escape") { inp.value = ""; render(); }
+        });
+        document.addEventListener("click", function(e) { if (e.target !== inp && !ac.contains(e.target)) ac.style.display = "none"; });
+      }
+      wireSearch(searchEl, acEl, pinChoice);
+      if (hideEl && hideAcEl) wireSearch(hideEl, hideAcEl, hideChoice);
+
+      boxEl.addEventListener("click", function(e) {
+        if (e.target.id === "pin-clear") { pinnedGenes = []; pinnedCompounds = []; redrawPins(); renderBox(); }
+        else if (e.target.classList.contains("pin-x")) {
+          if (e.target.getAttribute("data-c")) unpinCompound(e.target.getAttribute("data-c"));
+          else unpinGene(e.target.getAttribute("data-g"));
+        }
+      });
+      if (hideBoxEl) hideBoxEl.addEventListener("click", function(e) {
+        if (e.target.id === "hide-clear") { hiddenGenes = []; hiddenCompounds = []; afterHideChange(); }
+        else if (e.target.classList.contains("pin-x")) {
+          if (e.target.getAttribute("data-c")) unhideCompound(e.target.getAttribute("data-c"));
+          else unhideGene(e.target.getAttribute("data-g"));
+        }
+      });
+    })();
+
+    // --- download selection (CSV) ---------------------------------------------------
+    // Exports the current selection (in-range ∪ pinned proteins) as
+    // "Batch Molecule-Batch ID,genes". A standalone file:// page can't write to a chosen
+    // path silently, so we use showSaveFilePicker when available (lets you pick the folder,
+    // e.g. next to the HTML) and fall back to a normal browser download otherwise.
+    (function() {
+      var btn  = document.getElementById("dl-btn");
+      var note = document.getElementById("dl-note");
+      if (!btn) return;
+      function fname() {   // timestamped default; the browser save dialog lets you rename
+        var d = new Date(), p = function(n) { return (n < 10 ? "0" : "") + n; };
+        return "" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate())
+             + "_" + p(d.getHours()) + "_" + p(d.getMinutes()) + "_" + p(d.getSeconds()) + ".csv";
+      }
+      btn.addEventListener("click", async function() {
+        var out = exportCSVHook();
+        if (!out) { note.textContent = "export unavailable (no range data)"; return; }
+        if (!out.nRows) { note.textContent = "current selection is empty"; return; }
+        var name = fname();
+        var blob = new Blob([out.csv], {type: "text/csv;charset=utf-8"});
+        try {
+          if (window.showSaveFilePicker) {
+            var h = await window.showSaveFilePicker({suggestedName: name,
+              types: [{description: "CSV", accept: {"text/csv": [".csv"]}}]});
+            var w = await h.createWritable(); await w.write(blob); await w.close();
+            note.textContent = "✓ saved " + h.name + " (" + out.nRows + " rows)";
+            return;
+          }
+        } catch (e) { if (e && e.name === "AbortError") return; }   // cancelled, or fall through
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob); a.download = name;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function() { URL.revokeObjectURL(a.href); }, 1000);
+        note.textContent = "✓ downloaded " + name + " (" + out.nRows + " rows) → Downloads";
+      });
+    })();
   });
 </script>
 '''
@@ -3402,6 +3946,20 @@ def plot_3d_interface(
         _add_colour_trace(ctrl_grp, f'control ({len(ctrl_grp)})',
                           '#9e9e9e', symbol='diamond', size=7)
 
+    # Pinned-genes overlay — initially empty; the search box drives it (JS sets
+    # x/y/z/text/customdata on pin). Gold diamond + always-on label; deliberately NOT
+    # added to area_trace_indices, so the range sliders / filters never touch it —
+    # a pinned gene stays visible regardless of every filter.
+    # markers-only: the gene-name labels are drawn via scene.annotations (refreshLabels),
+    # the SAME 11px SVG path as every other gene — gl3d trace-text renders oversized.
+    fig.add_trace(go.Scatter3d(
+        x=[], y=[], z=[], mode='markers',
+        marker=dict(size=6, color='#1D3557', symbol='diamond',
+                    opacity=1.0, line=dict(color='#1D3557', width=1.5)),
+        text=[], customdata=[], hovertext=[], hoverinfo='text', name='★ pinned',
+    ))
+    pin_trace_index = len(fig.data) - 1
+
     # Range-slider config. The colour traces are indices 1..N (trace 0 = grey
     # backdrop); the JS slices them to the in-range subset on each slider move.
     ranges_cfg = None
@@ -3444,14 +4002,15 @@ def plot_3d_interface(
             if _ax in ranges_cfg:
                 ranges_cfg[_ax]['lo'] = float(np.clip(_lo, ranges_cfg[_ax]['min'],
                                                       ranges_cfg[_ax]['max']))
-        # labelMax: gene-name labels render only while the in-range set is small enough
-        # to stay fast. Base it on the DEFAULT (focus) box — computed from the final lo
-        # handles AFTER range_defaults — so the initial view IS labelled; cap at 500 so
-        # sliding out toward the whole genome can't resurrect the slow all-labels render
-        # (drawing ~4,600 3D text sprites was the ~30 s cost).
+        # labelMax: a readable ceiling on how many gene-name labels render at once
+        # (drawing them all — ~4,600+ SVG annotations — was the ~30 s cost). Floor at 800
+        # so widening the ranges past the initial focus box actually surfaces more labels
+        # (previously it stayed frozen at the small focus-box count); the initial focus box
+        # can label more if it's bigger; hard ceiling 1000. refreshLabels() spreads this
+        # budget EVENLY across the MS-score range rather than clustering at the top.
         _lx, _ly, _lz = ranges_cfg['x']['lo'], ranges_cfg['y']['lo'], ranges_cfg['z']['lo']
         _focus_n = int(((xv >= _lx) & (yv >= _ly) & (zv >= _lz)).sum())
-        ranges_cfg['labelMax'] = min(max(_focus_n + 20, 70), 500)
+        ranges_cfg['labelMax'] = int(min(max(_focus_n + 20, 800), 1000))
         print(f'  [range_sliders] default box ≈ {_focus_n} genes; '
               f'gene labels shown while ≤ {ranges_cfg["labelMax"]} in range '
               f'(drag handles to widen/narrow)')
@@ -3604,6 +4163,28 @@ def plot_3d_interface(
         _plate_dates_map = ({str(p): str(plate_dates[p]) for p in all_plates
                              if plate_dates.get(p) is not None}
                             if plate_dates else {})
+        # gene -> plotted [x, y, z] (z is _zplot, the rendered z) + sorted name list,
+        # for the search box / pin overlay. Built from plot_df = ALL genes, so any gene
+        # is pinnable (incl. zero-R² genes greyed out of the default range).
+        _gene_xyz = {str(g): [float(x), float(y), float(z)] for g, x, y, z in
+                     zip(plot_df['gene'], plot_df[x_col], plot_df[y_col], plot_df['_zplot'])}
+        _all_genes = sorted(_gene_xyz)
+        # gene -> marker colour for the pin overlay, matching the area-trace colouring:
+        # control genes grey, else disease_area colour (na_area_color when missing).
+        _ctrl_set = set(control_genes)
+        _areas_col = (plot_df['disease_area'] if 'disease_area' in plot_df.columns
+                      else pd.Series([None] * len(plot_df), index=plot_df.index))
+        _gene_color = {str(g): ('#9e9e9e' if g in _ctrl_set else
+                                (disease_area_colors.get(a, na_area_color) if pd.notna(a) else na_area_color))
+                       for g, a in zip(plot_df['gene'], _areas_col)}
+        # compound -> target genes (pinning a compound pins its target genes) + sorted
+        # compound list for the search autocomplete. Built from compounds_df.
+        _compound_genes = {}
+        if (compounds_df is not None and len(compounds_df)
+                and {'compound', 'gene'} <= set(compounds_df.columns)):
+            for _c, _sub in compounds_df.groupby('compound'):
+                _compound_genes[str(_c)] = sorted({str(g) for g in _sub['gene']})
+        _all_compounds = sorted(_compound_genes)
         data_js = (
             'window.__GENE_COMPOUNDS__ = ' + _jsp(custom if have_compounds else {}) + ';\n'
             'window.__GENE_PATENTS__ = ' + _jsp(gene_patents_map) + ';\n'
@@ -3619,6 +4200,12 @@ def plot_3d_interface(
             'window.__CONTAMINANT_DEFAULT_ON__ = ' + _json.dumps(bool(contaminant_default_on)) + ';\n'
             'window.__RANGES__ = ' + _jsp(ranges_cfg) + ';\n'
             'window.__AREA_DATA__ = ' + _jsp(area_data) + ';\n'
+            'window.__PIN_TRACE__ = ' + str(int(pin_trace_index)) + ';\n'
+            'window.__ALL_GENES__ = ' + _jsp(_all_genes) + ';\n'
+            'window.__GENE_XYZ__ = ' + _jsp(_gene_xyz) + ';\n'
+            'window.__GENE_COLOR__ = ' + _jsp(_gene_color) + ';\n'
+            'window.__ALL_COMPOUNDS__ = ' + _jsp(_all_compounds) + ';\n'
+            'window.__COMPOUND_GENES__ = ' + _jsp(_compound_genes) + ';\n'
             'window.__VOLCANO_MODE__ = '
             + _json.dumps('svg' if (volcano_significant and 'significant'
                                     in (volcano_source.columns if volcano_source is not None else []))

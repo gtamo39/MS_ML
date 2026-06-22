@@ -46,18 +46,18 @@ BMS_GENES: data/patent/BMS_Pipeline_genes.csv
 OT_CACHE: output/MS/opentargets_target_disease.parquet
 GENE_SAR_OUT: output/MS/20260529_geneSAR_R2_full_genome.csv
 MCS_CSV: output/MS/20260505_target_final_mcs.csv
-ML_MODEL_OUTPUT: output/ML/trained_models/20260513
+ML_MODEL_OUTPUT: output/ML/trained_models/20260617_select_genes # date should match that of last MS tranche
 CM2RM:
 - SRB-0005653
 FEATURES_TYPE: prevalence
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
-CHEMLIB_OVERWRITE: true
+CHEMLIB_OVERWRITE: false
 DFRAW_OVERWRITE: false
-DFRAW_PATH: output/MS/df_raw.csv
-MS_PATH: output/MS/MS.csv
+DFRAW_PATH: output/MS/df_raw.parquet
+MS_PATH: output/MS/MS.parquet
 
-IFACE_OVERWRITE: true               # true -> rebuild + save the interface inputs; false -> load them from IFACE_DIR + free RAM
+IFACE_OVERWRITE: false             # true -> rebuild + save the interface inputs; false -> load them from IFACE_DIR + free RAM
 IFACE_DIR: output/interface            # iface_df / compounds_df / meas / plate2date checkpoint for the 3D interface
 
 # strong cell-signature cohort (func_enrich_all_sel): which compounds enter the
