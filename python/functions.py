@@ -1331,7 +1331,7 @@ _INTERFACE_INJECT = '''
   #filter-panel { position: fixed; top: 12px; left: 12px; z-index: 9998;
                   background: white; border: 1px solid #bbb; border-radius: 6px;
                   padding: 6px 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.12);
-                  font: 11px sans-serif; color: #333; max-height: 80vh;
+                  font: 11px sans-serif; color: #333; max-height: 80vh; width: 415px;
                   overflow-y: auto; display: none; user-select: none; }
   #filter-panel .fp-group + .fp-group { margin-top: 8px; }
   /* section labels grouping the filters (Compound filters / Target filters) */
@@ -1339,6 +1339,10 @@ _INTERFACE_INJECT = '''
                               text-transform: uppercase; color: #457B9D; margin: 0 0 5px; }
   #filter-panel .fp-section.fp-sec2 { margin-top: 12px; padding-top: 8px;
                                       border-top: 1px solid #ddd; }
+  /* collapsible whole-section header (e.g. PIN/HIDE) */
+  #filter-panel .fp-section.fp-collap { cursor: pointer; }
+  #filter-panel .fp-section.collapsed .fp-caret { transform: rotate(-90deg); }
+  #sec-search.collapsed + #search-group { display: none; }
   #filter-panel .pf-head { font-weight: 700; padding-bottom: 4px; cursor: pointer;
                            border-bottom: 1px solid #eee; margin-bottom: 4px; }
   #filter-panel .pf-head span { color: #1D3557; cursor: pointer; font-weight: 400;
@@ -1434,6 +1438,13 @@ _INTERFACE_INJECT = '''
             letter-spacing: 0; color: #fff; background: #1D3557; border: none; border-radius: 4px; }
   #dl-btn:hover { background: #16324f; }
   #dl-note { margin-top: 5px; font: 11px sans-serif; color: #2A9D8F; word-break: break-all; }
+  /* Session save/load: two buttons in the section header (mirror #dl-btn) */
+  #sec-session { display: flex; align-items: center; justify-content: space-between; }
+  #sec-session .sess-btns { display: inline-flex; gap: 6px; }
+  #sess-save-btn, #sess-load-btn { padding: 2px 10px; font: 600 11px sans-serif; cursor: pointer;
+            text-transform: none; letter-spacing: 0; color: #fff; background: #1D3557; border: none; border-radius: 4px; }
+  #sess-save-btn:hover, #sess-load-btn:hover { background: #16324f; }
+  #sess-note { margin-top: 5px; font: 11px sans-serif; color: #2A9D8F; word-break: break-all; }
   #hover-patents {
     position: fixed; top: 12px; right: 660px; z-index: 9999;
     background: white; border: 1px solid #bbb; border-radius: 6px;
@@ -1522,7 +1533,7 @@ _INTERFACE_INJECT = '''
   #range-panel .rp-reset:hover { text-decoration: underline; }
 </style>
 <div id="filter-panel">
-  <div class="fp-section" id="sec-search">PIN/HIDE</div>
+  <div class="fp-section fp-collap" id="sec-search"><span class="fp-caret">&#9662;</span>PIN/HIDE</div>
   <div class="fp-group" id="search-group">
     <div id="gene-search-wrap">
       <input type="text" id="gene-search" placeholder="search to pin…" autocomplete="off" spellcheck="false">
@@ -1559,6 +1570,10 @@ _INTERFACE_INJECT = '''
     <div class="pf-head" title="Toggle whole compound classes on or off — control compounds and known contaminants."><span class="fp-caret">&#9662;</span>Other</div>
     <div id="cf-boxes" class="fp-boxes"><label><input type="checkbox" id="control-toggle" checked> Controls</label><label><input type="checkbox" id="contaminant-toggle" checked> Contaminants</label></div>
   </div>
+  <div class="fp-group collapsed" id="validation-compound-group" style="display:none">
+    <div class="pf-head" title="Show or hide compounds by FBXO31 validation status — validated (dependent) vs devalidated (independent) compounds."><span class="fp-caret">&#9662;</span>Validation <span id="vcf-all">all</span> / <span id="vcf-none">none</span></div>
+    <div id="vcf-boxes" class="fp-boxes"></div>
+  </div>
   <div class="fp-section fp-sec2" id="sec-target">Target filters</div>
   <div class="fp-group collapsed" id="depmap-group" style="display:none">
     <div class="pf-head" title="Filter genes by their DepMap cell-fitness class (Pan-essential, Selective, Non-essential)."><span class="fp-caret">&#9662;</span>DepMap dependency <span id="df-all">all</span> / <span id="df-none">none</span></div>
@@ -1579,6 +1594,11 @@ _INTERFACE_INJECT = '''
   <div class="fp-section fp-sec2" id="sec-download">Download selection<button id="dl-btn" title="Download the current selection (proteins + their compounds) as CSV">Save</button></div>
   <div class="fp-group" id="download-group">
     <div id="dl-note"></div>
+  </div>
+  <div class="fp-section fp-sec2" id="sec-session">Session<span class="sess-btns"><button id="sess-save-btn" title="Save the whole interface state (pins, hides, filters, ranges, view) to a .iface file">Save</button><button id="sess-load-btn" title="Load a previously saved .iface session and restore its state">Load</button></span></div>
+  <div class="fp-group" id="session-group">
+    <input type="file" id="sess-file" accept=".iface,.json,application/json" style="display:none">
+    <div id="sess-note"></div>
   </div>
 </div>
 <div id="hover-img">
@@ -1643,6 +1663,7 @@ _INTERFACE_INJECT = '''
     var cnBoxes = document.getElementById("cn-boxes");
     var lfBoxes = document.getElementById("lf-boxes");
     var vfBoxes = document.getElementById("vf-boxes");
+    var vcfBoxes = document.getElementById("vcf-boxes");
     var patents = window.__GENE_PATENTS__ || {};
     var depmapTpl = window.__DEPMAP_URL__ || "https://depmap.org/portal/gene/{gene}";
     var pageSize = window.__PAGE_SIZE__ || 5;
@@ -1671,6 +1692,7 @@ _INTERFACE_INJECT = '''
     // A compound is shown unless its class is toggled off (controls and/or contaminants).
     function cmpAllowed(t) {
       if (isHiddenCompound(t[0])) return false;   // hidden compounds drop from count/export/panel
+      if (!cmpValAllowed(t[0])) return false;     // compound-validation (FBXO31 dependent/independent)
       if (!controlOn && controlCompounds[t[0]]) return false;
       if (!contaminantOn && contaminantCompounds[t[0]]) return false;
       return true;
@@ -1731,6 +1753,29 @@ _INTERFACE_INJECT = '''
       if (isD && tickedVal[valLabelNo] !== false) return true;
       return false;
     }
+    // Compound-validation filter (compound-level, mirror of the gene one): the
+    // "dependent" tickbox controls compounds in validated_compounds, "independent"
+    // controls devalidated_compounds. A compound in neither set is unaffected.
+    // Gates in cmpAllowed(), so an unticked box hides those compounds from the
+    // panel/count/export and greys genes whose only compounds were hidden.
+    var cmpValidatedSet = {};
+    (window.__VALIDATED_COMPOUNDS__ || []).forEach(function(c) { cmpValidatedSet[c] = true; });
+    var cmpDevalidatedSet = {};
+    (window.__DEVALIDATED_COMPOUNDS__ || []).forEach(function(c) { cmpDevalidatedSet[c] = true; });
+    var cmpValLabelYes = window.__CMP_VAL_LABEL_YES__ || "Yes";
+    var cmpValLabelNo  = window.__CMP_VAL_LABEL_NO__  || "No";
+    var cmpValCats = window.__CMP_VALIDATION_CATS__ || [];
+    var cmpValDefaults = window.__CMP_VALIDATION_DEFAULTS__ || null;
+    var tickedCmpVal = {};
+    cmpValCats.forEach(function(c) { tickedCmpVal[c] = cmpValDefaults ? (cmpValDefaults.indexOf(c) !== -1) : true; });
+    function cmpValAllowed(c) {
+      if (!cmpValCats.length) return true;
+      var isV = cmpValidatedSet[c], isD = cmpDevalidatedSet[c];
+      if (!isV && !isD) return true;
+      if (isV && tickedCmpVal[cmpValLabelYes] !== false) return true;
+      if (isD && tickedCmpVal[cmpValLabelNo] !== false) return true;
+      return false;
+    }
     var gd = document.querySelector(".plotly-graph-div") || document.querySelector(".js-plotly-plot");
     if (!gd) return;
 
@@ -1747,6 +1792,8 @@ _INTERFACE_INJECT = '''
       legEl.appendChild(sp);
     });
 
+    // declared before the display IIFE (which assigns it) so a later var-initializer can't clobber it
+    var setMode2DHook = function(two) {};         // set in the display block; switches 2D/3D view
     // --- Display: 2D / 3D toggle. 2D = orthographic camera down the SAR (x) axis so only
     // association (y) × MS (z) show; x-axis hidden, rotation locked. Same Scatter3d traces,
     // so every filter / slider / pin / hover interaction is untouched. SAR slider still filters.
@@ -1776,6 +1823,7 @@ _INTERFACE_INJECT = '''
         setMode(seg ? seg.getAttribute("data-mode") === "2D"
                     : !tg.querySelector(".seg2d").classList.contains("active"));
       });
+      setMode2DHook = setMode;   // let session-load switch the view
     })();
 
     var pinned = false;
@@ -1817,6 +1865,7 @@ _INTERFACE_INJECT = '''
     var refreshLabelsHook = function() {};        // set in the range block; rebuilds in-range labels
     var updateCountHook = function() {};          // set in the range block; refreshes the protein/compound tally
     var exportCSVHook = function() { return null; };  // set in the range block; builds the selection CSV
+    var applyPinHideHook = function() {};         // set in the pin/hide block; re-renders pins/hides from the arrays
 
     // A gene is "active" under the current Plate + Activity ticks if it has at
     // least one compound whose plate AND activity are both ticked. Used to grey
@@ -2323,6 +2372,11 @@ _INTERFACE_INJECT = '''
                      function() { return contaminantOn; }, function(v) { contaminantOn = v; });
     var _cg = document.getElementById("compound-group");
     if (_cg && (_hasCtrl || _hasCont)) _cg.style.display = "";
+    // Compound-validation group (FBXO31 dependent/independent) — compound-centric mirror
+    // of the target Validation filter; reuses buildGroup (its change handler re-runs the mask).
+    var hasCmpValG = buildGroup(cmpValCats, tickedCmpVal, vcfBoxes, "vcf-all", "vcf-none");
+    var _vcg = document.getElementById("validation-compound-group");
+    if (_vcg && hasCmpValG) _vcg.style.display = "";
     // DepMap dependency group — generic checkbox group keyed by category.
     var hasDepG = buildGroup(depmapCats, tickedDep, dfBoxes, "df-all", "df-none");
     var _dg = document.getElementById("depmap-group");
@@ -2340,7 +2394,7 @@ _INTERFACE_INJECT = '''
     if (_vg && hasValG) _vg.style.display = "";
     // Section labels: hide a section header if none of its groups are present.
     var _secC = document.getElementById("sec-compound");
-    if (_secC) _secC.style.display = (hasPlateG || hasActG || _hasCtrl || _hasCont) ? "" : "none";
+    if (_secC) _secC.style.display = (hasPlateG || hasActG || _hasCtrl || _hasCont || hasCmpValG) ? "" : "none";
     var _secT = document.getElementById("sec-target");
     if (_secT) _secT.style.display = (hasDepG || hasConfG || hasLofG || hasValG) ? "" : "none";
     pf.style.display = "block";   // always shown — the Display (2D/3D) section is always present
@@ -2349,6 +2403,9 @@ _INTERFACE_INJECT = '''
     for (var _h = 0; _h < _heads.length; _h++) {
       _heads[_h].addEventListener("click", function() { this.parentNode.classList.toggle("collapsed"); });
     }
+    // collapsible whole-section header (PIN/HIDE) — toggles the section + hides #search-group via CSS
+    var _secSearch = document.getElementById("sec-search");
+    if (_secSearch) _secSearch.addEventListener("click", function() { this.classList.toggle("collapsed"); });
 
     // --- range sliders (R² / association / MS score) ---
     // Each axis has a dual handle (lo/hi). On change we slice every colour trace
@@ -2676,6 +2733,8 @@ _INTERFACE_INJECT = '''
         });
         hideBoxEl.innerHTML = h;
       }
+      // re-render pins/hides from the (externally mutated) arrays — used by session-load
+      applyPinHideHook = function() { rebuildHidden(); redrawPins(); renderBox(); renderHideBox(); };
 
       // mutually-exclusive click modes: Pin (orange) / Hide (red)
       function setMode(mode) {       // "", "pin", "hide"
@@ -2783,6 +2842,127 @@ _INTERFACE_INJECT = '''
         document.body.appendChild(a); a.click(); document.body.removeChild(a);
         setTimeout(function() { URL.revokeObjectURL(a.href); }, 1000);
         note.textContent = "✓ downloaded " + name + " (" + out.nRows + " rows) → Downloads";
+      });
+    })();
+
+    // --- session save / load (.iface) -----------------------------------------------
+    // Captures the full interface state (pins, hides, every filter tickbox, the three
+    // range sliders, 2D/3D mode + camera) to a .iface JSON file and restores it on load,
+    // so a saved session reproduces exactly what was on screen. file:// can't write
+    // silently → showSaveFilePicker when available, else a normal download; load reads a
+    // user-picked file via FileReader.
+    (function() {
+      var saveBtn = document.getElementById("sess-save-btn");
+      var loadBtn = document.getElementById("sess-load-btn");
+      var fileIn  = document.getElementById("sess-file");
+      var note    = document.getElementById("sess-note");
+      if (!saveBtn || !loadBtn || !fileIn) return;
+      var AXS = ["x", "y", "z"];
+
+      function gather() {
+        var s = {version: 1,
+                 pinnedGenes: pinnedGenes.slice(), pinnedCompounds: pinnedCompounds.slice(),
+                 hiddenGenes: hiddenGenes.slice(), hiddenCompounds: hiddenCompounds.slice(),
+                 filters: {plates: Object.assign({}, ticked), activity: Object.assign({}, tickedAct),
+                           control: controlOn, contaminant: contaminantOn,
+                           depmap: Object.assign({}, tickedDep), confidence: Object.assign({}, tickedConf),
+                           lof: Object.assign({}, tickedLof), validationTarget: Object.assign({}, tickedVal),
+                           validationCompound: Object.assign({}, tickedCmpVal)}};
+        if (els && els.x && els.x.lo) {
+          s.ranges = {};
+          AXS.forEach(function(a) { if (els[a]) s.ranges[a] = [els[a].lo.value, els[a].hi.value]; });
+        }
+        var seg2d = document.querySelector("#disp-toggle .seg2d");
+        s.mode2d = !!(seg2d && seg2d.classList.contains("active"));
+        try {
+          var cam = gd && gd._fullLayout && gd._fullLayout.scene && gd._fullLayout.scene.camera;
+          if (cam) s.camera = JSON.parse(JSON.stringify(cam));
+        } catch (e) {}
+        return s;
+      }
+
+      // overwrite a ticked-map + sync its checkboxes from a saved {value: bool} object
+      function applyGroup(map, el, saved) {
+        if (!saved) return;
+        Object.keys(saved).forEach(function(k) { map[k] = saved[k]; });
+        if (el) Array.prototype.forEach.call(el.querySelectorAll("input[value]"), function(cb) {
+          if (Object.prototype.hasOwnProperty.call(saved, cb.value)) cb.checked = !!saved[cb.value];
+        });
+      }
+      // after setting plate leaves, re-derive each date's tri-state parent checkbox
+      function refreshPlateParents() {
+        Array.prototype.forEach.call(document.querySelectorAll("#pf-boxes .pf-date"), function(d) {
+          var kids = d.querySelectorAll(".pf-date-boxes input[value]"), all = kids.length > 0;
+          for (var i = 0; i < kids.length; i++) if (!kids[i].checked) { all = false; break; }
+          var par = d.querySelector(".pf-date-all"); if (par) par.checked = all;
+        });
+      }
+      function setArr(arr, vals) { arr.length = 0; (vals || []).forEach(function(v) { arr.push(v); }); }
+
+      function apply(s) {
+        if (!s || typeof s !== "object") throw new Error("not a session object");
+        setArr(pinnedGenes, s.pinnedGenes); setArr(pinnedCompounds, s.pinnedCompounds);
+        setArr(hiddenGenes, s.hiddenGenes); setArr(hiddenCompounds, s.hiddenCompounds);
+        applyPinHideHook();                       // rebuild hidden cache + re-render pins/hides
+        if (s.ranges && els && els.x) AXS.forEach(function(a) {
+          if (s.ranges[a] && els[a]) { els[a].lo.value = s.ranges[a][0]; els[a].hi.value = s.ranges[a][1]; }
+        });
+        var f = s.filters || {};
+        applyGroup(ticked, document.getElementById("pf-boxes"), f.plates); refreshPlateParents();
+        applyGroup(tickedAct, document.getElementById("af-boxes"), f.activity);
+        applyGroup(tickedDep, document.getElementById("df-boxes"), f.depmap);
+        applyGroup(tickedConf, document.getElementById("cn-boxes"), f.confidence);
+        applyGroup(tickedLof, document.getElementById("lf-boxes"), f.lof);
+        applyGroup(tickedVal, document.getElementById("vf-boxes"), f.validationTarget);
+        applyGroup(tickedCmpVal, document.getElementById("vcf-boxes"), f.validationCompound);
+        if (typeof f.control === "boolean") {
+          controlOn = f.control; var cb = document.getElementById("control-toggle"); if (cb) cb.checked = controlOn;
+        }
+        if (typeof f.contaminant === "boolean") {
+          contaminantOn = f.contaminant; var cb2 = document.getElementById("contaminant-toggle"); if (cb2) cb2.checked = contaminantOn;
+        }
+        recolor3d();                              // re-run the mask (filters+hidden+ranges) + labels + count
+        if (typeof s.mode2d === "boolean") setMode2DHook(s.mode2d);
+        if (s.camera) { try { Plotly.relayout(gd, {"scene.camera": s.camera}); } catch (e) {} }
+      }
+
+      function sfname() {
+        var d = new Date(), p = function(n) { return (n < 10 ? "0" : "") + n; };
+        return "" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate())
+             + "_" + p(d.getHours()) + p(d.getMinutes()) + "_session.iface";
+      }
+      saveBtn.addEventListener("click", async function() {
+        var blob = new Blob([JSON.stringify(gather(), null, 1)], {type: "application/json"});
+        var name = sfname();
+        try {
+          if (window.showSaveFilePicker) {
+            var h = await window.showSaveFilePicker({suggestedName: name,
+              types: [{description: "Interface session", accept: {"application/json": [".iface"]}}]});
+            var w = await h.createWritable(); await w.write(blob); await w.close();
+            note.textContent = "✓ saved " + h.name; return;
+          }
+        } catch (e) { if (e && e.name === "AbortError") return; }
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob); a.download = name;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function() { URL.revokeObjectURL(a.href); }, 1000);
+        note.textContent = "✓ downloaded " + name + " → Downloads";
+      });
+      loadBtn.addEventListener("click", function() { fileIn.value = ""; fileIn.click(); });
+      fileIn.addEventListener("change", function() {
+        var file = fileIn.files && fileIn.files[0];
+        if (!file) return;
+        var r = new FileReader();
+        r.onload = function() {
+          try {
+            var s = JSON.parse(r.result);
+            apply(s);
+            var nHid = (s.hiddenGenes || []).length + (s.hiddenCompounds || []).length;
+            var nPin = (s.pinnedGenes || []).length + (s.pinnedCompounds || []).length;
+            note.textContent = "✓ loaded " + file.name + " (" + nPin + " pinned, " + nHid + " hidden)";
+          } catch (e) { note.textContent = "✗ could not load: " + ((e && e.message) || e); }
+        };
+        r.readAsText(file);
       });
     })();
   });
@@ -3278,6 +3458,11 @@ def plot_3d_interface(
     devalidated_targets=(),
     validated_label='Yes',
     devalidated_label='No',
+    validated_compounds=(),
+    devalidated_compounds=(),
+    compound_validated_label='Yes',
+    compound_devalidated_label='No',
+    compound_validation_defaults=None,
     depmap_defaults=None,
     conf_defaults=None,
     lof_defaults=None,
@@ -4096,6 +4281,17 @@ def plot_3d_interface(
             if s.startswith('selective'):
                 return 'Selective'
             return 'Other'
+        # Research is only ever shown for a PLOTTED gene (hover/click/pin), so drop any
+        # record whose gene isn't a dot — a whole-genome research file (~10K genes) would
+        # otherwise ship records for thousands of unreachable genes in the sidecar. This
+        # keeps research available for every plotted gene while bounding the payload.
+        if gene_research:
+            _plotted = set(plot_df['gene'])
+            _n_all = len(gene_research)
+            gene_research = {g: r for g, r in gene_research.items() if g in _plotted}
+            _mb = len(_json.dumps(gene_research)) / 1e6
+            print(f'  [gene_research] {len(gene_research)}/{_n_all} records kept '
+                  f'(plotted genes only) — {_mb:.1f} MB injected')
         gene_depmap, gene_conf, gene_lof = {}, {}, {}
         if gene_research:
             for _g, _rec in gene_research.items():
@@ -4144,6 +4340,21 @@ def plot_3d_interface(
         if _hl_genes & set(devalidated_set):
             validation_cats.append(devalidated_label)
         validation_def = _resolve_defaults(validation_defaults, validation_cats)
+
+        # Compound-validation (FBXO31 dependent/independent) filter: mirror of the target
+        # one but keyed by compound id. Restrict the injected sets + categories to compounds
+        # actually present in the panel, so the dropdown only shows when it can act.
+        _present_cmps = (set(str(c) for c in compounds_df['compound'])
+                         if (compounds_df is not None and len(compounds_df)
+                             and 'compound' in compounds_df.columns) else set())
+        cmp_validated_set = [c for c in (str(x) for x in (validated_compounds or [])) if c in _present_cmps]
+        cmp_devalidated_set = [c for c in (str(x) for x in (devalidated_compounds or [])) if c in _present_cmps]
+        cmp_validation_cats = []
+        if cmp_validated_set:
+            cmp_validation_cats.append(compound_validated_label)
+        if cmp_devalidated_set:
+            cmp_validation_cats.append(compound_devalidated_label)
+        cmp_validation_def = _resolve_defaults(compound_validation_defaults, cmp_validation_cats)
 
         # The data blobs (compound panels, patents, research, area metadata, plate/
         # activity/range config) are NOT needed to first-paint the 3D plot — only
@@ -4231,7 +4442,13 @@ def plot_3d_interface(
             'window.__VALIDATION_CATS__ = ' + _jsp(validation_cats) + ';\n'
             'window.__VALIDATION_DEFAULTS__ = ' + (_jsp(validation_def) if validation_def is not None else 'null') + ';\n'
             'window.__VAL_LABEL_YES__ = ' + _json.dumps(str(validated_label)) + ';\n'
-            'window.__VAL_LABEL_NO__ = ' + _json.dumps(str(devalidated_label)) + ';\n')
+            'window.__VAL_LABEL_NO__ = ' + _json.dumps(str(devalidated_label)) + ';\n'
+            'window.__VALIDATED_COMPOUNDS__ = ' + _jsp(cmp_validated_set) + ';\n'
+            'window.__DEVALIDATED_COMPOUNDS__ = ' + _jsp(cmp_devalidated_set) + ';\n'
+            'window.__CMP_VALIDATION_CATS__ = ' + _jsp(cmp_validation_cats) + ';\n'
+            'window.__CMP_VALIDATION_DEFAULTS__ = ' + (_jsp(cmp_validation_def) if cmp_validation_def is not None else 'null') + ';\n'
+            'window.__CMP_VAL_LABEL_YES__ = ' + _json.dumps(str(compound_validated_label)) + ';\n'
+            'window.__CMP_VAL_LABEL_NO__ = ' + _json.dumps(str(compound_devalidated_label)) + ';\n')
         _data_name = os.path.splitext(os.path.basename(html_path))[0] + '_data.js'
         _data_path = os.path.join(os.path.dirname(html_path), _data_name)
         with open(_data_path, 'w') as fh:

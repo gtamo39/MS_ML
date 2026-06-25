@@ -6,7 +6,16 @@
 # colors
 ACTIVE_C: '#008bfb'
 SILENT_C: '#ff0051'
+SERAC_C:                    # named palette: name -> hex (quote hex; '#' is a YAML comment otherwise)
+  azure: '#0EA5CE'
+  ember: '#E65D32'
+  terracotta: '#EEA090'
+  gold: '#E8B04B'
+  olive: '#74B24A'
+  sky_blue: '#A6C8E4'
+  paper: '#E3E0DA'
 
+# Files
 PATENTS_RAW: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/5_Literature and Patents/0_Companies/Pharma_SmallMolecule_Patents_MASTER.xlsx
 DROPBOX_PROT: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/12_Proteomics/5_Inventory/CDDVault/Proteomics/GiorgioTamo/
 DROPBOX_ML: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/
@@ -29,6 +38,7 @@ FBX_BATCHES:                          # {} -> MEASURE / MSSCORE / REPORT; concat
 - 20260616/20260616_FBX_{}.csv
 - 20260616_2/20260616_FBX_{}_02.csv
 - 20260617/20260617_FBX_{}.csv
+- 20260623/20260623_FBX_{}.csv
 PLATE_DATE_OVERRIDES: {}              # plate -> 'YYYY-MM-DD' for plates absent from source exports
                                       # (Pw58/60/61/62 now resolve via the 0520 DB export -> 2026-05-20)
 
@@ -47,8 +57,7 @@ OT_CACHE: output/MS/opentargets_target_disease.parquet
 GENE_SAR_OUT: output/MS/20260529_geneSAR_R2_full_genome.csv
 MCS_CSV: output/MS/20260505_target_final_mcs.csv
 ML_MODEL_OUTPUT: output/ML/trained_models/20260617_select_genes # date should match that of last MS tranche
-CM2RM:
-- SRB-0005653
+
 FEATURES_TYPE: prevalence
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
@@ -77,5 +86,5 @@ CONTROLS:
 - SRB-0000615
 
 # disease association research:
-RESEARCH_161_T_20260604: /mnt/c/Users/gtamo/Desktop/GT/disease_association/20260604_degradation_research.json
+GENE_RESEARCH: /mnt/c/Users/gtamo/Desktop/GT/disease_association/20260623_10Kgenes_research.json
 FUNC_ENRICH_PATH: output/cell_signature/compound_function_enrichment.parquet
