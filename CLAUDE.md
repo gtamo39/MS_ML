@@ -104,6 +104,7 @@ Operational rules for the assistant in this project:
 - **Don't run `Bash`** that prints rows of `serac_df`, `df_raw`, `MF_features`, or any DataFrame with a `smiles` column. Schema is fine (`df.columns.tolist()`, `df.shape`, `df.dtypes`); values are not (`df.head()`).
 - **Don't `Grep`** file *contents* for compound IDs (`SRB-XXXXXXX-NNN` format). Searching file names / paths is fine.
 - **Don't echo** notebook outputs that render structure thumbnails, top-K SMILES tables, or per-compound logfc.
+- **Don't `Read` Jupyter notebooks (or any file with saved/executed outputs) that may contain structures.** Opening a `.ipynb` returns its cell *outputs* — `df.head()` tables, structure thumbnails, top-K SMILES, per-compound values — which cross the wire even if you only wanted the code. To inspect or edit a notebook, extract **cell sources only** (strip `outputs`) with a small script, or edit by known cell-id; never read the whole notebook blind. Keep notebook outputs cleared before any tooling reads them.
 - **Aggregate-only is fine**: gene names (HGNC is public), per-gene R² values, plate IDs, compound counts, model hyperparameters, code, configs.
 - **Public reference SMILES are fine** for unit tests: ethanol (`CCO`), benzene (`c1ccccc1`), aspirin, or anything from RDKit's example data.
 - **Schema-then-synthesize for testing**: to test code against a real file's *shape*, read only its schema — column names and dtypes (`pd.read_csv(path, nrows=0).columns`, `df.dtypes`) — never the values, then **generate synthetic data matching that schema** (random floats, fake `C_001`/`G_001` IDs, public SMILES like `CCO`) and run the test on the synthetic frame. This keeps real values off the wire while still exercising the code. Prefer this over reading rows.
@@ -130,7 +131,7 @@ If a tool would meaningfully accelerate the work but only runs as a hosted API, 
 
 - **Read before writing** — always read a file before editing it
 - **Check for existing patterns** — match the style already in the codebase
-- **Write simplified code** — the fewest clear statements: inline single-use intermediates, derive lists directly, collapse verbose literals; no redundant variables or steps. Simplify before reporting done — readability first (simple ≠ cryptic one-liner).
+- **Write simplified code** — the fewest clear statements: inline single-use intermediates, derive lists directly, collapse verbose literals; no redundant variables or steps. Prefer a vectorized/built-in expression over a hand-rolled helper function when equally clear (e.g. `.str.extract(...).astype(float)` over a custom `apply` function). Simplify before reporting done — readability first (simple ≠ cryptic one-liner).
 - **Keep comments to 1 line** — 2 lines max, and only if really necessary. Applies to inline/block comments (incl. notebook cell-top `##` comments); docstrings are exempt.
 - **Encapsulate state properly** — use classes or function parameters instead of global variables
 - **Update docs when changing code** — keep documentation in sync

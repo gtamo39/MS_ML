@@ -3678,7 +3678,8 @@ def plot_3d_interface(
                     if os.path.isfile(p):
                         if compound not in _thumb_copied:
                             dst = os.path.join(_thumb_out, f'{compound}.png')
-                            if not os.path.exists(dst):
+                            # refresh if missing or the source is newer (real PNG superseding a cached rdkit render)
+                            if not os.path.exists(dst) or os.path.getmtime(p) > os.path.getmtime(dst):
                                 shutil.copyfile(p, dst)
                             _thumb_copied.add(compound)
                         _stats['png'] += 1

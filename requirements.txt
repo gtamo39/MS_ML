@@ -35,3 +35,4 @@ openpyxl==3.1.5
 setuptools==80.10.2
 pyarrow>=14,<18   # parquet engine for pandas.read_parquet (used by OT_CACHE)
 pyyaml>=6.0   # config/config.yaml loader in the notebooks
+psycopg2-binary==2.9.12 # for aws database connection
