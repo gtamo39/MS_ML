@@ -45,7 +45,7 @@ CYTOINFO: data/cytotox/cellline_info.xlsx
 DEPMAP_DIR: data/external/depmap/
 MSIGDB_DIR: data/external/msigdb     # drop MSigDB symbols GMTs here (h.all*, c2.cp.reactome*) to qualify signature clusters
 
-CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
+
 OT_ROOT: data/external/opentarget
 PHARMA_PATENT_CSV: data/patent/20260528_pharma_sm.csv
 BMS_GENES: data/patent/BMS_Pipeline_genes.csv
@@ -57,12 +57,13 @@ ML_MODEL_OUTPUT: output/ML/trained_models/20260617_select_genes # date should ma
 FEATURES_TYPE: prevalence
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
-CHEMLIB_OVERWRITE: false
+CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
+CHEMLIB_OVERWRITE: true
 DFRAW_OVERWRITE: false
 DFRAW_PATH: output/MS/df_raw.parquet
 MS_PATH: output/MS/MS.parquet
 
-IFACE_OVERWRITE: true             # true -> rebuild + save the interface inputs; false -> load them from IFACE_DIR + free RAM
+IFACE_OVERWRITE: false             # true -> rebuild + save the interface inputs; false -> load them from IFACE_DIR + free RAM
 IFACE_DIR: output/interface            # iface_df / compounds_df / meas / plate2date checkpoint for the 3D interface
 
 # strong cell-signature cohort (func_enrich_all_sel): which compounds enter the
@@ -84,3 +85,10 @@ CONTROLS:
 # disease association research:
 GENE_RESEARCH: /mnt/c/Users/gtamo/Desktop/GT/disease_association/20260623_10Kgenes_research.json
 FUNC_ENRICH_PATH: output/cell_signature/compound_function_enrichment.parquet
+
+# 250 representative-compound selection (MS_TargetML "Get 250 compounds"):
+# k-means over [PCoA(Tanimoto) chemical comps | 8 Hallmark-theme NES], one medoid/cluster.
+STOCK_INVENTORY: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/8_Data_Warehouse/Inventory/Inventory update for SRCBS_20260626.xlsx
+STOCK_PWS: WX-SRCBS
+STOCK_SHEET: Solid(II)
+STOCK_ID_COL: Batch Molecule Batch ID   # batch id (SRB-XXXXXXX-NNN); compound = its SRB-XXXXXXX prefix

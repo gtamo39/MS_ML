@@ -1671,7 +1671,8 @@ _INTERFACE_INJECT = '''
     var axisHelp = window.__AXIS_HELP__ || {};
     var plates = window.__PLATES__ || [];
     var ticked = {};
-    plates.forEach(function(p) { ticked[p] = true; });
+    var plateDefaults = window.__PLATE_DEFAULTS__ || null;   // plates to start ticked; null/absent = all
+    plates.forEach(function(p) { ticked[p] = plateDefaults ? (plateDefaults.indexOf(p) !== -1) : true; });
     var activities = window.__ACTIVITIES__ || [];
     // Optional focus set: if __ACTIVITY_DEFAULTS__ is given, only those levels
     // start ticked (others off) so the view opens focused on e.g. Low + Single.
@@ -3426,6 +3427,7 @@ def plot_3d_interface(
     top_n_hover=5,
     compounds_df=None,
     plate_dates=None,
+    plate_defaults=None,
     panels=None,
     return_panels=False,
     volcano_source=None,
@@ -4375,6 +4377,9 @@ def plot_3d_interface(
         _plate_dates_map = ({str(p): str(plate_dates[p]) for p in all_plates
                              if plate_dates.get(p) is not None}
                             if plate_dates else {})
+        # plates to start ticked (None -> all). Restrict to plates actually present.
+        _plate_def = (None if plate_defaults is None
+                      else [str(p) for p in plate_defaults if str(p) in set(map(str, all_plates))])
         # gene -> plotted [x, y, z] (z is _zplot, the rendered z) + sorted name list,
         # for the search box / pin overlay. Built from plot_df = ALL genes, so any gene
         # is pinnable (incl. zero-R² genes greyed out of the default range).
@@ -4404,6 +4409,7 @@ def plot_3d_interface(
             'window.__PAGE_SIZE__ = ' + str(int(page_size)) + ';\n'
             'window.__PLATES__ = ' + _jsp(list(all_plates)) + ';\n'
             'window.__PLATE_DATES__ = ' + _jsp(_plate_dates_map) + ';\n'
+            'window.__PLATE_DEFAULTS__ = ' + (_jsp(_plate_def) if _plate_def is not None else 'null') + ';\n'
             'window.__ACTIVITIES__ = ' + _jsp(list(all_activities)) + ';\n'
             'window.__ACTIVITY_DEFAULTS__ = ' + (_jsp(_act_def) if _act_def else 'null') + ';\n'
             'window.__CONTROL_COMPOUNDS__ = ' + _jsp([str(c) for c in (control_compounds or [])]) + ';\n'
@@ -6284,3 +6290,121 @@ def plot_autoresearch_progress(
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
 
     return fig, ax
+
+
+# ── Single high-level cell-state label per compound from its Hallmark GSEA ──
+# Hallmark -> MSigDB process category: the CANONICAL 8 categories from Liberzon et al. 2015
+# (Cell Systems, Table 1). Citable taxonomy; EDIT here to retune. The wiki documents the prior
+# phenotype-oriented 9-theme variant (exact regroupings) to revert to if readability is preferred.
+HALLMARK_THEMES = {
+    # proliferation  (P53_PATHWAY is canonically HERE, not DNA damage)
+    'HALLMARK_E2F_TARGETS': 'Proliferation', 'HALLMARK_G2M_CHECKPOINT': 'Proliferation',
+    'HALLMARK_MYC_TARGETS_V1': 'Proliferation', 'HALLMARK_MYC_TARGETS_V2': 'Proliferation',
+    'HALLMARK_MITOTIC_SPINDLE': 'Proliferation', 'HALLMARK_P53_PATHWAY': 'Proliferation',
+    # DNA damage
+    'HALLMARK_DNA_REPAIR': 'DNA damage', 'HALLMARK_UV_RESPONSE_UP': 'DNA damage',
+    'HALLMARK_UV_RESPONSE_DN': 'DNA damage',
+    # metabolic
+    'HALLMARK_OXIDATIVE_PHOSPHORYLATION': 'Metabolic', 'HALLMARK_GLYCOLYSIS': 'Metabolic',
+    'HALLMARK_FATTY_ACID_METABOLISM': 'Metabolic', 'HALLMARK_CHOLESTEROL_HOMEOSTASIS': 'Metabolic',
+    'HALLMARK_BILE_ACID_METABOLISM': 'Metabolic', 'HALLMARK_XENOBIOTIC_METABOLISM': 'Metabolic',
+    'HALLMARK_HEME_METABOLISM': 'Metabolic',
+    # immune  (IL6_JAK_STAT3 is immune; IL2_STAT5 / TNFA are signaling, below)
+    'HALLMARK_ALLOGRAFT_REJECTION': 'Immune', 'HALLMARK_COAGULATION': 'Immune',
+    'HALLMARK_COMPLEMENT': 'Immune', 'HALLMARK_INTERFERON_ALPHA_RESPONSE': 'Immune',
+    'HALLMARK_INTERFERON_GAMMA_RESPONSE': 'Immune', 'HALLMARK_IL6_JAK_STAT3_SIGNALING': 'Immune',
+    'HALLMARK_INFLAMMATORY_RESPONSE': 'Immune',
+    # signaling  (TNFA_SIGNALING_VIA_NFKB, IL2_STAT5_SIGNALING, MTORC1_SIGNALING are canonically HERE)
+    'HALLMARK_ANDROGEN_RESPONSE': 'Signaling', 'HALLMARK_ESTROGEN_RESPONSE_EARLY': 'Signaling',
+    'HALLMARK_ESTROGEN_RESPONSE_LATE': 'Signaling', 'HALLMARK_IL2_STAT5_SIGNALING': 'Signaling',
+    'HALLMARK_KRAS_SIGNALING_UP': 'Signaling', 'HALLMARK_KRAS_SIGNALING_DN': 'Signaling',
+    'HALLMARK_MTORC1_SIGNALING': 'Signaling', 'HALLMARK_NOTCH_SIGNALING': 'Signaling',
+    'HALLMARK_PI3K_AKT_MTOR_SIGNALING': 'Signaling', 'HALLMARK_HEDGEHOG_SIGNALING': 'Signaling',
+    'HALLMARK_TGF_BETA_SIGNALING': 'Signaling', 'HALLMARK_TNFA_SIGNALING_VIA_NFKB': 'Signaling',
+    'HALLMARK_WNT_BETA_CATENIN_SIGNALING': 'Signaling',
+    # pathway  (the catch-all: apoptosis / hypoxia / secretion / UPR / ROS)
+    'HALLMARK_APOPTOSIS': 'Pathway', 'HALLMARK_HYPOXIA': 'Pathway',
+    'HALLMARK_PROTEIN_SECRETION': 'Pathway', 'HALLMARK_UNFOLDED_PROTEIN_RESPONSE': 'Pathway',
+    'HALLMARK_REACTIVE_OXYGEN_SPECIES_PATHWAY': 'Pathway',
+    # cellular component
+    'HALLMARK_APICAL_JUNCTION': 'Cellular component', 'HALLMARK_APICAL_SURFACE': 'Cellular component',
+    'HALLMARK_PEROXISOME': 'Cellular component',
+    # development  (ADIPOGENESIS, ANGIOGENESIS, EMT are canonically HERE)
+    'HALLMARK_ADIPOGENESIS': 'Development', 'HALLMARK_ANGIOGENESIS': 'Development',
+    'HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION': 'Development', 'HALLMARK_MYOGENESIS': 'Development',
+    'HALLMARK_SPERMATOGENESIS': 'Development', 'HALLMARK_PANCREAS_BETA_CELLS': 'Development',
+}
+
+# readable signed names for the phenotype-clear categories; others fall back to "Category ↑/↓".
+# (The canonical "Pathway"/"Cellular component" buckets are heterogeneous, hence no special name.)
+def label_signatures_hallmark(msigdb_sig, *, theme_map=HALLMARK_THEMES, min_abs_nes=1.0, top_k=3,
+                              compound_col='compound', term_col='term_name',
+                              nes_col='NES', collection_col='collection'):
+    """Assign ONE high-level signed cell-state label per compound from its Hallmark GSEA.
+
+    Each Hallmark set is mapped to its MSigDB process category (``theme_map`` — the canonical
+    8 categories from Liberzon et al. 2015, Table 1); a compound's
+    per-theme score is the signed mean NES of the theme's ``top_k`` strongest (by |NES|) sets
+    — robust to diluting a coherent subset across a large heterogeneous theme, and a mixed-
+    direction theme cancels out (coordination-aware, unlike a single-term argmax). The label is
+    the theme with the largest ``|score|``, named purely descriptively as ``"theme ↑/↓"``
+    (no interpretive mapping); themes weaker than ``min_abs_nes`` yield ``"Unclassified"``.
+
+    :param df msigdb_sig: long GSEA table (one row per compound × term) with NES + collection.
+    :param dict theme_map: Hallmark term_name -> theme. :param float min_abs_nes: label floor.
+    :return df: one row per compound — ``signature_label``, ``top_theme``/``top_nes``,
+        ``second_theme``/``second_nes`` (runner-up for transparency), ``proliferation_nes``
+        (always shown — the key axis for anti-proliferative screens).
+    """
+    # theme score = signed mean of the top_k sets by |NES| (coherent sub-signal, not diluted over all
+    # members); shared with hallmark_theme_matrix. stack() drops absent (compound, theme) cells.
+    theme_nes = (hallmark_theme_matrix(msigdb_sig, theme_map=theme_map, top_k=top_k,
+                                       compound_col=compound_col, term_col=term_col,
+                                       nes_col=nes_col, collection_col=collection_col)
+                 .stack().rename('nes').reset_index())
+    theme_nes['rank'] = theme_nes.groupby(compound_col)['nes'].transform(
+        lambda s: s.abs().rank(method='first', ascending=False))
+
+    top    = theme_nes[theme_nes['rank'] == 1].set_index(compound_col)
+    second = theme_nes[theme_nes['rank'] == 2].set_index(compound_col)
+    prolif = (theme_nes[theme_nes['theme'] == 'Proliferation']
+              .set_index(compound_col)['nes'])
+
+    def _name(theme, nes):
+        # purely descriptive: the dominant theme + its direction, no interpretive mapping.
+        if abs(nes) < min_abs_nes:
+            return 'Unclassified'
+        return f'{theme} {"↑" if nes > 0 else "↓"}'
+
+    out = pd.DataFrame(index=top.index)
+    out['signature_label']  = [_name(t, n) for t, n in zip(top['theme'], top['nes'])]
+    out['top_theme']        = top['theme']
+    out['top_nes']          = top['nes'].round(2)
+    out['second_theme']     = second['theme']
+    out['second_nes']       = second['nes'].round(2)
+    out['proliferation_nes'] = prolif.round(2)
+    return out.reset_index().rename(columns={'index': compound_col})
+
+
+def hallmark_theme_matrix(msigdb_sig, *, theme_map=HALLMARK_THEMES, top_k=3,
+                          compound_col='compound', term_col='term_name',
+                          nes_col='NES', collection_col='collection'):
+    """Per-compound × Hallmark-theme signed-NES matrix — the signature-space features.
+
+    Each Hallmark set maps to its MSigDB process category (``theme_map``); a compound's
+    theme score is the signed mean NES of that category's ``top_k`` strongest (by |NES|)
+    sets — the same coordination-aware score `label_signatures_hallmark` reduces to a single
+    label, exposed here as an 8-dim vector for clustering / embedding. Absent (compound,
+    theme) cells are left NaN (a compound with no sets in a category); fill with 0.0 for a
+    dense feature matrix.
+
+    :param df msigdb_sig: long GSEA table (one row per compound × term) with NES + collection.
+    :return df: compound (index) × theme (columns, sorted) signed-NES matrix.
+    """
+    hall = msigdb_sig[msigdb_sig[collection_col] == 'Hallmark'].copy()
+    hall['theme'] = hall[term_col].map(theme_map)
+    hall = hall.dropna(subset=['theme'])
+    mat = (hall.groupby([compound_col, 'theme'])[nes_col]
+           .apply(lambda s: s.reindex(s.abs().sort_values(ascending=False).index).head(top_k).mean())
+           .unstack('theme'))
+    return mat.reindex(columns=sorted(set(theme_map.values())))
