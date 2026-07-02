@@ -58,8 +58,8 @@ FEATURES_TYPE: prevalence
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
 CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
-CHEMLIB_OVERWRITE: true
-DFRAW_OVERWRITE: false
+CHEMLIB_OVERWRITE: false
+DFRAW_OVERWRITE: true
 DFRAW_PATH: output/MS/df_raw.parquet
 MS_PATH: output/MS/MS.parquet
 

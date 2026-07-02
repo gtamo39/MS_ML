@@ -425,9 +425,11 @@ def keep_latest_batch_per_compound(df_raw, compound_col='compound',
     d['_win_batch'] = d.groupby(compound_col)['_batch_n'].transform('max')
     d = d[d['_batch_n'] == d['_win_batch']]
 
-    # Rule 2: among the surviving batch, the latest date per compound.
+    # Rule 2: among the surviving batch, the latest date per compound. If a compound has
+    # NO valid date (all-NaT — e.g. a date-less source), _win_date is NaT and NaT==NaT is
+    # False, so keep those rows explicitly rather than silently dropping the whole compound.
     d['_win_date'] = d.groupby(compound_col)['_date'].transform('max')
-    d = d[d['_date'] == d['_win_date']]
+    d = d[(d['_date'] == d['_win_date']) | d['_win_date'].isna()]
 
     out = (d.drop(columns=['_batch_n', '_date', '_win_batch', '_win_date'])
              .reset_index(drop=True))
