@@ -6410,3 +6410,25 @@ def hallmark_theme_matrix(msigdb_sig, *, theme_map=HALLMARK_THEMES, top_k=3,
            .apply(lambda s: s.reindex(s.abs().sort_values(ascending=False).index).head(top_k).mean())
            .unstack('theme'))
     return mat.reindex(columns=sorted(set(theme_map.values())))
+
+
+def read_excel_maybe_encrypted(path, sheet_name=0, password=None):
+    """Read an Excel file that may be password-protected.
+
+    If `password` is given and the file is encrypted, decrypt it in memory with
+    msoffcrypto before reading; otherwise read `path` directly. Returns a DataFrame.
+    Use when a source xlsx is password-protected: pass password=STOCK_PWS.
+    """
+    if not password:
+        return pd.read_excel(path, sheet_name=sheet_name)
+    import io, msoffcrypto
+    buf = io.BytesIO()
+    with open(path, 'rb') as fh:
+        off = msoffcrypto.OfficeFile(fh)
+        if off.is_encrypted():
+            off.load_key(password=password)
+            off.decrypt(buf)
+        else:
+            buf.write(fh.read())
+    buf.seek(0)
+    return pd.read_excel(buf, sheet_name=sheet_name)

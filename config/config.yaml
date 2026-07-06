@@ -59,7 +59,7 @@ PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
 CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
 CHEMLIB_OVERWRITE: false
-DFRAW_OVERWRITE: true
+DFRAW_OVERWRITE: false
 DFRAW_PATH: output/MS/df_raw.parquet
 MS_PATH: output/MS/MS.parquet
 
@@ -88,7 +88,7 @@ FUNC_ENRICH_PATH: output/cell_signature/compound_function_enrichment.parquet
 
 # 250 representative-compound selection (MS_TargetML "Get 250 compounds"):
 # k-means over [PCoA(Tanimoto) chemical comps | 8 Hallmark-theme NES], one medoid/cluster.
-STOCK_INVENTORY: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/8_Data_Warehouse/Inventory/Inventory update for SRCBS_20260626.xlsx
+STOCK_INVENTORY: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/8_Data_Warehouse/Inventory/Inventory update for SRCBS_20260703.xlsx
 STOCK_PWS: WX-SRCBS
 STOCK_SHEET: Solid(II)
 STOCK_ID_COL: Batch Molecule Batch ID   # batch id (SRB-XXXXXXX-NNN); compound = its SRB-XXXXXXX prefix
