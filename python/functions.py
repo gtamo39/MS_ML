@@ -3498,3 +3498,86 @@ def read_excel_maybe_encrypted(path, sheet_name=0, password=None):
             buf.write(fh.read())
     buf.seek(0)
     return pd.read_excel(buf, sheet_name=sheet_name)
+
+
+def _dropbox_ssh_host(host):
+    """Resolve the ssh target for the Dropbox host: arg, else $DROPBOX_SSH_HOST."""
+    host = host or os.environ.get('DROPBOX_SSH_HOST')
+    if not host:
+        raise ValueError("No ssh host — pass host= or set $DROPBOX_SSH_HOST (e.g. 'gtamo@laptop').")
+    return host
+
+
+def _read_stream(buf, ext, sheet_name=0, **read_kwargs):
+    """Parse an in-memory file buffer to a DataFrame by extension; unknown types return the buffer."""
+    ext = ext.lower()
+    if ext in ('.csv', '.tsv'):
+        return pd.read_csv(buf, sep='\t' if ext == '.tsv' else ',', **read_kwargs)
+    if ext in ('.xlsx', '.xls'):
+        return pd.read_excel(buf, sheet_name=sheet_name, **read_kwargs)
+    if ext == '.parquet':
+        return pd.read_parquet(buf, **read_kwargs)
+    return buf
+
+
+def open_dropbox(path, *, host=None, port=None):
+    """Stream a Dropbox-hosted file into memory over ssh — nothing is written to the local disk.
+
+    `path` is the file's absolute path *on the host* (i.e. the config value verbatim, e.g.
+    PATENTS_RAW), where the Dropbox desktop client keeps it synced. Requires passwordless ssh
+    from here to the host. Returns an io.BytesIO positioned at 0.
+    """
+    import io, shlex, subprocess
+    host = _dropbox_ssh_host(host)
+    port = str(port or os.environ.get('DROPBOX_SSH_PORT', 22))
+    cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-p', port,
+           host, f'cat {shlex.quote(path)}']
+    out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if out.returncode != 0:
+        raise FileNotFoundError(f"ssh cat failed for {path!r} on {host}: "
+                                f"{out.stderr.decode(errors='replace').strip()}")
+    return io.BytesIO(out.stdout)
+
+
+def pull_from_dropbox(path, *, host=None, port=None, sheet_name=0, **read_kwargs):
+    """Read a Dropbox-hosted file directly into a DataFrame over ssh (no local copy).
+
+    Streams the file from the host's Dropbox mirror (see open_dropbox) and parses by extension:
+    .csv/.tsv → read_csv, .xlsx/.xls → read_excel, .parquet → read_parquet; other extensions
+    return the raw io.BytesIO (e.g. feed a .sdf to an RDKit ForwardSDMolSupplier). Pass the config
+    path verbatim, e.g. df = pull_from_dropbox(PX_20260529_DB).
+    """
+    buf = open_dropbox(path, host=host, port=port)
+    return _read_stream(buf, os.path.splitext(path)[1], sheet_name=sheet_name, **read_kwargs)
+
+
+def push_to_dropbox(src, remote_path, *, host=None, port=None):
+    """Stream a DataFrame / bytes / local file TO the host's Dropbox mirror over ssh (no local copy).
+
+    A DataFrame is serialized by remote_path's extension (.csv or .parquet); bytes / a file-like /
+    a local path are sent as-is. The remote directory is created if missing; the Dropbox desktop
+    client then syncs the file to the cloud. NB: this writes into the company Dropbox — mind the
+    project's data-privacy rules before pushing derived data out.
+    """
+    import io, shlex, subprocess
+    host = _dropbox_ssh_host(host)
+    port = str(port or os.environ.get('DROPBOX_SSH_PORT', 22))
+    if isinstance(src, pd.DataFrame):
+        ext, b = os.path.splitext(remote_path)[1].lower(), io.BytesIO()
+        if ext == '.csv': src.to_csv(b, index=False)
+        elif ext == '.parquet': src.to_parquet(b, index=False)
+        else: raise ValueError(f"DataFrame push needs a .csv/.parquet remote_path, got {ext!r}")
+        data = b.getvalue()
+    elif isinstance(src, (bytes, bytearray)):
+        data = bytes(src)
+    elif hasattr(src, 'read'):
+        data = src.read()
+    else:
+        with open(src, 'rb') as fh:
+            data = fh.read()
+    cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-p', port, host,
+           f'mkdir -p {shlex.quote(os.path.dirname(remote_path))} && cat > {shlex.quote(remote_path)}']
+    out = subprocess.run(cmd, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if out.returncode != 0:
+        raise IOError(f"ssh push failed to {remote_path!r} on {host}: "
+                      f"{out.stderr.decode(errors='replace').strip()}")

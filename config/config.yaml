@@ -15,6 +15,14 @@ SERAC_C:                    # named palette: name -> hex (quote hex; '#' is a YA
   sky_blue: '#A6C8E4'
   paper: '#E3E0DA'
 
+# Dropbox access over SSH — pull/push company-Dropbox files from machines without the desktop client.
+# The path keys below (PATENTS_RAW, PX_*, DROPBOX_*, FBX_DIR, ENAMINE_*, STOCK_INVENTORY, ...) are
+# absolute WSL paths where the laptop's Dropbox client syncs. fn.pull_from_dropbox / open_dropbox /
+# push_to_dropbox stream those paths verbatim over passwordless ssh — nothing is written to local disk.
+# See README "Pulling data files from Dropbox" for the reverse-tunnel setup.
+DROPBOX_SSH_HOST: gtamo@localhost   # reverse-tunnel endpoint to the laptop's WSL sshd (ssh -R 2222:localhost:22 cluster)
+DROPBOX_SSH_PORT: 2222
+
 # Files
 PATENTS_RAW: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/5_Literature and Patents/0_Companies/Pharma_SmallMolecule_Patents_MASTER.xlsx
 DROPBOX_PROT: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/12_Proteomics/5_Inventory/CDDVault/Proteomics/GiorgioTamo/
@@ -58,13 +66,10 @@ FEATURES_TYPE: prevalence
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
 CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
-CHEMLIB_OVERWRITE: false
-DFRAW_OVERWRITE: false
+CHEMLIB_OVERWRITE: true
+DFRAW_OVERWRITE: true
 DFRAW_PATH: output/MS/df_raw.parquet
 MS_PATH: output/MS/MS.parquet
-
-IFACE_OVERWRITE: false             # true -> rebuild + save the interface inputs; false -> load them from IFACE_DIR + free RAM
-IFACE_DIR: output/interface            # iface_df / compounds_df / meas / plate2date checkpoint for the 3D interface
 
 # strong cell-signature cohort (func_enrich_all_sel): which compounds enter the
 # structure<->cell-state analysis (signature clustering + chemistry->class ML).
@@ -83,7 +88,6 @@ CONTROLS:
 - SRB-0000615
 
 # disease association research:
-GENE_RESEARCH: /mnt/c/Users/gtamo/Desktop/GT/disease_association/20260623_10Kgenes_research.json
 FUNC_ENRICH_PATH: output/cell_signature/compound_function_enrichment.parquet
 
 # 250 representative-compound selection (MS_TargetML "Get 250 compounds"):
