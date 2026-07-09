@@ -40,7 +40,7 @@ PX_20260529_CDDVAULT: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_
 PX_20260529_DB: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/Daniela/20260529_FBXOscreening/20260529_Proteomics_Database_CSV_Export.csv
 PX_SCREEN_LIB: data/MS/20260513_CDD_FBXO31_PxScreen_Source.csv
 
-FBX_DIR: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/Daniela/AdvantEidge Platform/Data_Prototype # data/advanteidge
+FBX_DIR: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/Daniela/AdvantEidge Platform/Data_Prototype   # streamed over the ssh tunnel (see Dropbox access)
 # tranches are auto-discovered: every date-named subdir (YYYYMMDD…) of FBX_DIR holding *FBX_<KIND>*.csv
 # is loaded + concatenated, and its plate date comes from the folder name — drop in a new folder, nothing to edit.
 PLATE_DATE_OVERRIDES: {}              # plate -> 'YYYY-MM-DD' for plates absent from source exports
@@ -66,8 +66,8 @@ FEATURES_TYPE: prevalence
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
 CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
-CHEMLIB_OVERWRITE: true
-DFRAW_OVERWRITE: true
+CHEMLIB_OVERWRITE: false
+DFRAW_OVERWRITE: false
 DFRAW_PATH: output/MS/df_raw.parquet
 MS_PATH: output/MS/MS.parquet
 

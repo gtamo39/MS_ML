@@ -486,7 +486,8 @@ FBX_MS_COLS = ['compound', 'ndown', 'origin', 'activity', 'date']
 
 def load_fbx_tranche(tranche_dir, *, control_compounds=(), contaminants=(),
                      drop_plate_substr=('MLN', 'KO', 'Eval'),
-                     dfraw_cols=FBX_DFRAW_COLS, ms_cols=FBX_MS_COLS, verbose=True):
+                     dfraw_cols=FBX_DFRAW_COLS, ms_cols=FBX_MS_COLS,
+                     opener=None, lister=None, verbose=True):
     """
     Format one AdvantEdge / FBX export folder into the ``df_raw`` / ``MS`` schemas
     so it can be ``pd.concat``-ed with the existing datasets. Returns
@@ -511,12 +512,18 @@ def load_fbx_tranche(tranche_dir, *, control_compounds=(), contaminants=(),
         substrings (case-insensitive — e.g. MLN / KO / Eval conditions).
     :param list dfraw_cols: target df_raw column order.
     :param list ms_cols: target MS column order.
+    :param opener: optional ``path -> path|file-like`` hook (default: identity, reads local
+        paths). Pass ``fn.open_dropbox`` to stream the tranche CSVs over ssh instead.
+    :param lister: optional ``(dir, glob) -> [paths]`` hook (default: local ``glob``). Pass
+        ``fn.glob_dropbox`` to enumerate the tranche's CSVs on the ssh host.
     :param bool verbose: print aggregate diagnostics (counts) — no per-compound rows.
     :return: ``(df_raw_fbx, MS_fbx)`` in the df_raw / MS schemas.
     """
     import glob as _glob
     date = os.path.basename(tranche_dir.rstrip('/'))                 # folder, e.g. '20260616' or '20260616_2'
-    pick = lambda kind: _glob.glob(os.path.join(tranche_dir, f'*FBX_{kind}*.csv'))[0]
+    _list = lister or (lambda d, pat: _glob.glob(os.path.join(d, pat)))   # (dir, glob) -> paths
+    _open = opener or (lambda p: p)                                  # path -> path or file-like (ssh stream)
+    pick = lambda kind: _open(_list(tranche_dir, f'*FBX_{kind}*.csv')[0])
     measure = pd.read_csv(pick('MEASURE'),                           # drop the unused 'id' col
                           usecols=['pg', 'genes', 'uniquecontrast', 'logfc',
                                    'pvalue', 'adjpval', 'significant', 'plate'])
@@ -3539,6 +3546,24 @@ def open_dropbox(path, *, host=None, port=None):
     return io.BytesIO(out.stdout)
 
 
+def glob_dropbox(directory, pattern='*', *, host=None, port=None):
+    """List host paths matching `directory`/`pattern` over ssh — the remote shell expands the glob.
+
+    `directory` is quoted (may contain spaces); `pattern` is left unquoted so the host shell
+    expands it (e.g. '[0-9]*', '*FBX_MEASURE*.csv'). Returns a sorted list of host paths, or []
+    if nothing matches. Companion to open_dropbox for enumerating Dropbox files/dirs before
+    streaming them (e.g. discovering FBX tranche folders and their CSVs).
+    """
+    import shlex, subprocess
+    host = _dropbox_ssh_host(host)
+    port = str(port or os.environ.get('DROPBOX_SSH_PORT', 22))
+    cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-p', port, host,
+           f'ls -1d {shlex.quote(directory)}/{pattern} 2>/dev/null']
+    out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # ls exits non-zero when nothing matches — treat as empty, not an error
+    return sorted(line for line in out.stdout.decode(errors='replace').splitlines() if line)
+
+
 def pull_from_dropbox(path, *, host=None, port=None, sheet_name=0, **read_kwargs):
     """Read a Dropbox-hosted file directly into a DataFrame over ssh (no local copy).
 
@@ -3581,3 +3606,21 @@ def push_to_dropbox(src, remote_path, *, host=None, port=None):
     if out.returncode != 0:
         raise IOError(f"ssh push failed to {remote_path!r} on {host}: "
                       f"{out.stderr.decode(errors='replace').strip()}")
+
+
+def convert2sdf(src, suffix='.sdf'):
+    """Return a filesystem path to an SDF, spilling an in-memory stream to a temp file if needed.
+
+    Bridges a streamed Dropbox SDF (io.BytesIO / bytes from open_dropbox / _dbx) to the path-based
+    readers in Rdkit_tools — Chem.SDMolSupplier needs a real path, not a file-like. A str `src` is
+    returned unchanged (already a path); a file-like/bytes is written to a temporary .sdf whose path
+    is returned (in the system temp dir; not auto-deleted — the OS clears it). Usage:
+        enum = rdkit_tools.get_smiles_df_from_sdf(convert2sdf(_dbx(SDF_PATH)), origin='...')
+    """
+    import tempfile
+    if isinstance(src, str):
+        return src
+    data = src.read() if hasattr(src, 'read') else bytes(src)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(data)
+        return tmp.name
