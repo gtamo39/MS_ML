@@ -859,14 +859,15 @@ def plot_activity_area_absolute(
         cats=('Silent', 'Single (1)', 'Low (2-10)', 'Medium (11-25)', 'High (>25)'),
         colors=None, cumulative=True, annotate_total=True,
         show_rate_line=True, silent_label='Silent', rate_color='#1d3557',
-        dpi=150, ax=None):
+        date_format='%Y-%m-%d', figsize=None, dpi=150, ax=None):
     """
     **Absolute** (count, not 100%-normalised) stacked area of MS activity
     composition across tranches — the "growing library" view. With
     ``cumulative=True`` (default) each band is the running count of compounds
     screened up to a tranche, so the stack grows monotonically; a dotted
     **TOTAL** boundary with a marker per tranche traces the height and the total
-    is annotated at the first and last tranche. Styled after the editorial
+    is annotated at the first and last tranche. Each x-tick shows the date with
+    that tranche's compound count ``n=`` beneath. Styled after the editorial
     template (cream ground, earth palette, horizontal gridlines, bottom legend
     with a dotted TOTAL swatch).
 
@@ -891,6 +892,10 @@ def plot_activity_area_absolute(
         large tranche).
     :param str silent_label: inactive label (the rate is the non-silent share).
     :param str rate_color: colour of the activity-rate line / right axis.
+    :param str date_format: strftime format for the x-tick dates (e.g. ``'%Y-%m'``
+        when the tranches have been grouped by month).
+    :param tuple figsize: ``(width, height)`` in inches; ``None`` (default) scales
+        the width with the number of tranches. Only used when ``ax`` is None.
     :param int dpi: figure resolution (only used when ``ax`` is None; default 150).
     :param ax: optional matplotlib axes.
     :return: ``(ax, summary)`` — axes and a per-tranche DataFrame indexed by date
@@ -931,7 +936,7 @@ def plot_activity_area_absolute(
     x = np.arange(len(dates))
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(1.3 * len(dates) + 4, 5.5), dpi=dpi)
+        _, ax = plt.subplots(figsize=figsize or (1.3 * len(dates) + 4, 5.5), dpi=dpi)
     fig = ax.get_figure()
     fig.patch.set_facecolor(_BG); ax.set_facecolor(_BG)
     ax.set_axisbelow(True)
@@ -952,7 +957,9 @@ def plot_activity_area_absolute(
 
     ax.set_xlim(x[0], x[-1]); ax.set_ylim(0, totals.max() * 1.12)
     ax.set_xticks(x)
-    ax.set_xticklabels([f'{pd.Timestamp(d):%Y-%m-%d}' for d in dates])
+    _n_tranche = per_tranche.sum(axis=0)                        # compounds screened per tranche
+    ax.set_xticklabels([f'{pd.Timestamp(d):{date_format}}\nn={int(n):,}'
+                        for d, n in zip(dates, _n_tranche)])
     ax.set_ylabel('compounds (cumulative n)' if cumulative else 'compounds (n)')
     ax.tick_params(length=0)
     for s in ax.spines.values():
@@ -970,7 +977,7 @@ def plot_activity_area_absolute(
         axr.plot(x, rate, color=rate_color, lw=3, marker='o', ms=5, zorder=7)
         for j in range(len(dates)):                            # label each dot with its rate
             axr.annotate(f'{rate[j]:.0%}', (x[j], rate[j]),
-                         textcoords='offset points', xytext=(0, 9),
+                         textcoords='offset points', xytext=(0, -9), va='top',
                          ha='center', fontsize=9, fontweight='bold',
                          color=rate_color, zorder=8,
                          path_effects=[pe.withStroke(linewidth=3, foreground=_BG)])
@@ -3515,6 +3522,23 @@ def _dropbox_ssh_host(host):
     return host
 
 
+def _bytes_for_upload(src, remote_path):
+    """Serialize an upload source to bytes: a DataFrame by remote_path's extension, else as-is."""
+    import io
+    if isinstance(src, pd.DataFrame):
+        ext, b = os.path.splitext(remote_path)[1].lower(), io.BytesIO()
+        if ext == '.csv': src.to_csv(b, index=False)
+        elif ext == '.parquet': src.to_parquet(b, index=False)
+        else: raise ValueError(f"DataFrame push needs a .csv/.parquet remote_path, got {ext!r}")
+        return b.getvalue()
+    if isinstance(src, (bytes, bytearray)):
+        return bytes(src)
+    if hasattr(src, 'read'):
+        return src.read()
+    with open(src, 'rb') as fh:
+        return fh.read()
+
+
 def _read_stream(buf, ext, sheet_name=0, **read_kwargs):
     """Parse an in-memory file buffer to a DataFrame by extension; unknown types return the buffer."""
     ext = ext.lower()
@@ -3584,27 +3608,98 @@ def push_to_dropbox(src, remote_path, *, host=None, port=None):
     client then syncs the file to the cloud. NB: this writes into the company Dropbox — mind the
     project's data-privacy rules before pushing derived data out.
     """
-    import io, shlex, subprocess
+    import shlex, subprocess
     host = _dropbox_ssh_host(host)
     port = str(port or os.environ.get('DROPBOX_SSH_PORT', 22))
-    if isinstance(src, pd.DataFrame):
-        ext, b = os.path.splitext(remote_path)[1].lower(), io.BytesIO()
-        if ext == '.csv': src.to_csv(b, index=False)
-        elif ext == '.parquet': src.to_parquet(b, index=False)
-        else: raise ValueError(f"DataFrame push needs a .csv/.parquet remote_path, got {ext!r}")
-        data = b.getvalue()
-    elif isinstance(src, (bytes, bytearray)):
-        data = bytes(src)
-    elif hasattr(src, 'read'):
-        data = src.read()
-    else:
-        with open(src, 'rb') as fh:
-            data = fh.read()
+    data = _bytes_for_upload(src, remote_path)
     cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-p', port, host,
            f'mkdir -p {shlex.quote(os.path.dirname(remote_path))} && cat > {shlex.quote(remote_path)}']
     out = subprocess.run(cmd, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if out.returncode != 0:
         raise IOError(f"ssh push failed to {remote_path!r} on {host}: "
+                      f"{out.stderr.decode(errors='replace').strip()}")
+
+
+def _norm_slashes(path):
+    """Collapse repeated '/' (config paths are often concatenated into '...15_ML//predictions')."""
+    path = str(path)
+    while '//' in path:
+        path = path.replace('//', '/')
+    return path
+
+
+def _rclone_target(path, remote=None, prefix=None):
+    """Map a host Dropbox path to an rclone target, e.g. '/mnt/.../Dropbox/Serac_team/x' ->
+    'dropbox:Serac_team/x'. `remote`/`prefix` default to $DROPBOX_REMOTE / $DROPBOX_LOCAL_ROOT.
+    """
+    remote = remote or os.environ.get('DROPBOX_REMOTE', 'dropbox:')
+    prefix = _norm_slashes(prefix or os.environ.get('DROPBOX_LOCAL_ROOT', ''))
+    path = _norm_slashes(path)
+    if prefix and path.startswith(prefix):
+        path = path[len(prefix):]
+    elif prefix:
+        raise ValueError(f"{path!r} is not under DROPBOX_LOCAL_ROOT ({prefix!r}); "
+                         "pass prefix= or use an already-remote-relative path.")
+    return remote + path.lstrip('/')
+
+
+def open_rclone(path, *, remote=None, prefix=None):
+    """Stream a Dropbox-hosted file into memory via rclone — no ssh tunnel, no local copy.
+
+    The drop-in alternative to :func:`open_dropbox`: instead of reading the laptop's synced mirror
+    over a reverse tunnel, this pulls straight from Dropbox with the pre-authenticated `rclone`
+    remote, so it works with the laptop off. `path` is the config value verbatim (a host WSL path);
+    it is mapped to the remote by stripping DROPBOX_LOCAL_ROOT. Returns an io.BytesIO at 0.
+    """
+    import io, subprocess
+    target = _rclone_target(path, remote, prefix)
+    out = subprocess.run(['rclone', 'cat', target], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if out.returncode != 0:
+        raise FileNotFoundError(f"rclone cat failed for {target!r}: "
+                                f"{out.stderr.decode(errors='replace').strip()}")
+    return io.BytesIO(out.stdout)
+
+
+def glob_rclone(directory, pattern='*', *, remote=None, prefix=None):
+    """List Dropbox paths matching `directory`/`pattern` via rclone (companion to glob_dropbox).
+
+    Returns host-style paths (same shape glob_dropbox returns) so downstream openers are unchanged;
+    the glob is matched locally with fnmatch. Returns [] when the directory or pattern matches
+    nothing, rather than raising.
+    """
+    import fnmatch, subprocess
+    target = _rclone_target(directory, remote, prefix).rstrip('/')
+    out = subprocess.run(['rclone', 'lsf', target], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if out.returncode != 0:
+        return []
+    names = (n.rstrip('/') for n in out.stdout.decode(errors='replace').splitlines() if n)
+    base = _norm_slashes(directory).rstrip('/')
+    return sorted(f'{base}/{n}' for n in names if fnmatch.fnmatch(n, pattern))
+
+
+def pull_rclone(path, *, remote=None, prefix=None, sheet_name=0, **read_kwargs):
+    """Read a Dropbox-hosted file into a DataFrame via rclone (the pull_from_dropbox counterpart).
+
+    Streams with :func:`open_rclone` and parses by extension: .csv/.tsv → read_csv, .xlsx/.xls →
+    read_excel, .parquet → read_parquet; other extensions return the raw io.BytesIO.
+    """
+    buf = open_rclone(path, remote=remote, prefix=prefix)
+    return _read_stream(buf, os.path.splitext(str(path))[1], sheet_name=sheet_name, **read_kwargs)
+
+
+def push_rclone(src, remote_path, *, remote=None, prefix=None):
+    """Upload a DataFrame / bytes / local file to Dropbox via rclone (the push_to_dropbox counterpart).
+
+    A DataFrame is serialized by remote_path's extension (.csv or .parquet); bytes / a file-like /
+    a local path are sent as-is. Parent folders are created by rclone. NB: this writes into the
+    company Dropbox — mind the project's data-privacy rules before pushing derived data out.
+    """
+    import subprocess
+    target = _rclone_target(remote_path, remote, prefix)
+    out = subprocess.run(['rclone', 'rcat', target], input=_bytes_for_upload(src, remote_path),
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if out.returncode != 0:
+        raise IOError(f"rclone rcat failed to {target!r}: "
                       f"{out.stderr.decode(errors='replace').strip()}")
 
 

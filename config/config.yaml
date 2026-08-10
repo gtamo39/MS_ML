@@ -23,6 +23,14 @@ SERAC_C:                    # named palette: name -> hex (quote hex; '#' is a YA
 DROPBOX_SSH_HOST: gtamo@localhost   # reverse-tunnel endpoint to the laptop's WSL sshd (ssh -R 2223:localhost:22 cluster)
 DROPBOX_SSH_PORT: 2222
 
+# rclone backend (preferred): pulls straight from Dropbox, so no laptop / tunnel is needed.
+# fn.open_rclone / pull_rclone / glob_rclone / push_rclone map the WSL paths below to
+# <DROPBOX_REMOTE><path minus DROPBOX_LOCAL_ROOT>. Set DROPBOX_BACKEND: ssh to fall back
+# to the reverse tunnel. The rclone remote must point at the team namespace (root_namespace).
+DROPBOX_BACKEND: rclone             # 'rclone' (no laptop needed) | 'ssh' (reverse tunnel)
+DROPBOX_REMOTE: 'dropbox:'          # configured rclone remote (rclone listremotes)
+DROPBOX_LOCAL_ROOT: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/   # stripped to get the remote path
+
 # Files
 PATENTS_RAW: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/5_Literature and Patents/0_Companies/Pharma_SmallMolecule_Patents_MASTER.xlsx
 DROPBOX_PROT: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/12_Proteomics/5_Inventory/CDDVault/Proteomics/GiorgioTamo/
@@ -95,5 +103,5 @@ STOCK_PWS: WX-SRCBS
 STOCK_SHEET: Solid(II)
 STOCK_ID_COL: Batch Molecule Batch ID   # batch id (SRB-XXXXXXX-NNN); compound = its SRB-XXXXXXX prefix
 
-CHEMLIB_OVERWRITE: false
-DFRAW_OVERWRITE: false
+CHEMLIB_OVERWRITE: true
+DFRAW_OVERWRITE: true
