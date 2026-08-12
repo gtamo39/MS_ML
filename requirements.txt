@@ -40,3 +40,8 @@ pynndescent==0.6.0
 
 # decrypt password-protected inventory .xlsx (MS_TargetML 250-selection); import name: msoffcrypto
 msoffcrypto-tool==6.0.0
+
+# FEATURES_TYPE=H237 (H236 + 200 RDKit2D 'DS_*' descriptors, rdkit_tools.compute_H237_features).
+# Runs fully offline, no telemetry, no weights to download. Not on PyPI -> git URL pinned to the
+# installed commit so `pip install -r requirements.txt` is reproducible.
+descriptastorus @ git+https://github.com/bp-kelley/descriptastorus@9a190343bcd3cfd35142d378d952613bcac40797

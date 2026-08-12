@@ -655,12 +655,21 @@ def plot_activity_composition_over_time(
         MS, date_col='date', activity_col='activity',
         cats=('Silent', 'Single (1)', 'Low (2-10)', 'Medium (11-25)', 'High (>25)'),
         colors=None,
-        silent_label='Silent', show_rate_line=True, dpi=150, ax=None):
+        silent_label='Silent', show_rate_line=True, show_silent_line=False,
+        show_count_line=False, count_color='#2b2b2b', cumulative=False,
+        date_format='%Y-%m-%d', figsize=None, dpi=150, ax=None):
     """
     100%-stacked area of MS activity-category composition across screening tranches
     (x = tranche date) — the "shift toward signal" view. Right-axis labels = the
     categories; each x-tick shows the date with the compound count ``n=`` beneath;
     an optional bold line tracks the activity rate (non-silent share).
+
+    With ``cumulative=True`` each column is the composition of **everything screened
+    up to** that date (running counts, then normalised) rather than that tranche
+    alone — the library-to-date view, matching
+    :func:`plot_activity_area_absolute`'s cumulative stack but normalised to 100%.
+    The rate line then tracks the cumulative non-silent share, which moves far more
+    slowly than the per-tranche rate once the library is large.
 
     Expects the unified MS table, one row per compound-tranche::
 
@@ -677,12 +686,28 @@ def plot_activity_composition_over_time(
         (default) keeps the built-in earth-tone palette.
     :param str silent_label: inactive label (used for the activity-rate line).
     :param bool show_rate_line: overlay the non-silent activity-rate line.
+    :param bool show_silent_line: trace a discreet white line along the **top of
+        the silent band** and label each point with the silent share — the same
+        information as the activity-rate line, read off the stack itself
+        (mirrors :func:`plot_activity_area_absolute`).
+    :param bool show_count_line: overlay the compound count (cumulative if
+        ``cumulative``) on a right-hand count axis, labelled at each point. The
+        right axis then carries the counts instead of the category names — those
+        are already in the legend.
+    :param str count_color: colour of the compound-count line / right axis.
+    :param bool cumulative: compose from the running totals up to each date
+        (library-to-date) instead of per-tranche counts.
+    :param str date_format: strftime format for the x-tick dates (e.g. ``'%Y-%m'``
+        when the tranches have been grouped by month).
+    :param tuple figsize: ``(width, height)`` in inches; ``None`` (default) scales
+        the width with the number of tranches. Only used when ``ax`` is None.
     :param int dpi: figure resolution (only used when ``ax`` is None; default 150).
     :param ax: optional matplotlib axes.
     :return: ``(ax, summary)`` — axes and a per-tranche DataFrame indexed by date
-        with an ``n`` column and one share column per category.
+        with an ``n`` column (cumulative if set) and one share column per category.
     """
     import matplotlib.pyplot as plt
+    import matplotlib.patheffects as pe
     _DEFAULT_COLORS = ('#d8cdbf', '#c9b79a', '#88a06a', '#d99a3a', '#b8412f')
     cats = list(cats)
     if colors is None:
@@ -699,41 +724,91 @@ def plot_activity_composition_over_time(
                             activity_col)
     df[date_col] = pd.to_datetime(df[date_col])
 
-    grp   = df.groupby(date_col)
-    dates = sorted(grp.groups)
-    ns    = [len(grp.get_group(d)) for d in dates]
-    shares = np.zeros((len(cats), len(dates)))
+    grp    = df.groupby(date_col)
+    dates  = sorted(grp.groups)
+    counts = np.zeros((len(cats), len(dates)))
     for j, d in enumerate(dates):
-        vc  = grp.get_group(d)[activity_col].value_counts(normalize=True)
-        col = np.array([vc.get(c, 0.0) for c in cats])
-        shares[:, j] = col / col.sum() if col.sum() else col
+        vc = grp.get_group(d)[activity_col].value_counts()
+        counts[:, j] = [vc.get(c, 0) for c in cats]
+    if cumulative:
+        counts = counts.cumsum(axis=1)          # composition of everything screened up to each date
+    ns = counts.sum(axis=0)                     # per-column total (cumulative if set)
+    shares = np.divide(counts, ns, out=np.zeros_like(counts), where=ns > 0)
+    x = np.arange(len(dates))                   # even spacing, as in plot_activity_area_absolute
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(1.8 * len(dates) + 3, 5.5), dpi=dpi)
-    ax.stackplot(dates, shares, colors=colors, labels=cats,
+        _, ax = plt.subplots(figsize=figsize or (1.8 * len(dates) + 3, 5.5), dpi=dpi)
+    ax.stackplot(x, shares, colors=colors, labels=cats,
                  edgecolor='white', linewidth=0.6)
 
     if show_rate_line:
         rate = 1 - shares[cats.index(silent_label)]
-        ax.plot(dates, rate, color='#5b2a86', lw=3.5, marker='o', ms=5,
+        ax.plot(x, rate, color='#5b2a86', lw=3.5, marker='o', ms=5,
                 label='activity rate (non-silent)')
+        for j in range(len(dates)):                             # label each dot, below it
+            # nudge the end labels inward so they don't spill past the axes
+            _ha, _dx = ('left', 4) if j == 0 else ('right', -4) if j == len(dates) - 1 else ('center', 0)
+            ax.annotate(f'{rate[j]:.0%}', (x[j], rate[j]),
+                        textcoords='offset points', xytext=(_dx, -9), va='top',
+                        ha=_ha, fontsize=9, fontweight='bold',
+                        color='#5b2a86', zorder=8,
+                        path_effects=[pe.withStroke(linewidth=3, foreground='white')])
 
-    ax.set_ylim(0, 1); ax.set_xlim(min(dates), max(dates))
+    # discreet white boundary on top of the silent band, labelled with the silent share
+    if show_silent_line:
+        silent_top = shares[:cats.index(silent_label) + 1].sum(axis=0)
+        ax.plot(x, silent_top, color='white', lw=1.5, alpha=0.9, zorder=6)
+        for j in range(len(dates)):
+            # nudge the end labels inward so they don't spill past the axes
+            _ha, _dx = ('left', 4) if j == 0 else ('right', -4) if j == len(dates) - 1 else ('center', 0)
+            ax.annotate(f'{silent_top[j]:.0%} silent', (x[j], silent_top[j]),
+                        textcoords='offset points', xytext=(_dx, 5), va='bottom', ha=_ha,
+                        fontsize=8, color='white', zorder=7,
+                        path_effects=[pe.withStroke(linewidth=2, foreground=(0, 0, 0, 0.35))])
+
+    ax.set_ylim(0, 1); ax.set_xlim(x[0], x[-1])
     ax.set_yticks([0, .25, .5, .75, 1])
     ax.set_yticklabels(['0%', '25%', '50%', '75%', '100%'])
     ax.set_ylabel('share'); ax.set_xlabel('MS tranche')
-    ax.set_xticks(dates)
-    ax.set_xticklabels([f'{pd.Timestamp(d):%Y-%m-%d}\nn={n:,}'
+    ax.set_xticks(x)
+    # the count line already carries n at each point — don't repeat it under the date
+    ax.set_xticklabels([f'{pd.Timestamp(d):{date_format}}' if show_count_line
+                        else f'{pd.Timestamp(d):{date_format}}\nn={int(n):,}'
                         for d, n in zip(dates, ns)])
-    ax.set_title('A shift toward signal — MS activity composition over tranches',
+    ax.set_title('MS activity composition of the library screened to date' if cumulative
+                 else 'A shift toward signal — MS activity composition over tranches',
                  fontsize=13)
 
-    # right-axis category labels at each band's mid-height in the LAST tranche
-    last = shares[:, -1]; mids = np.cumsum(last) - last / 2
-    axr = ax.twinx(); axr.set_ylim(0, 1); axr.set_yticks(mids)
-    axr.set_yticklabels([c.upper() for c in cats]); axr.tick_params(length=0)
+    if show_count_line:
+        # compound count on the right axis — shares stay 100%-normalised on the left
+        axc = ax.twinx()
+        axc.plot(x, ns, color=count_color, lw=2, marker='o', ms=4, zorder=7,
+                 label='compounds (n)')
+        axc.set_ylim(0, ns.max() * 1.15); axc.set_xlim(ax.get_xlim())
+        for j in range(len(dates)):
+            # nudge the end labels inward so they don't spill past the axes
+            _ha, _dx = ('left', 4) if j == 0 else ('right', -4) if j == len(dates) - 1 else ('center', 0)
+            # below the curve: above collides with the silent-line labels early on
+            axc.annotate(f'{int(ns[j]):,}', (x[j], ns[j]),
+                         textcoords='offset points', xytext=(_dx, -8), va='top', ha=_ha,
+                         fontsize=9, fontweight='bold', color=count_color, zorder=8,
+                         path_effects=[pe.withStroke(linewidth=3, foreground='white')])
+        axc.set_ylabel('compounds (cumulative n)' if cumulative else 'compounds (n)',
+                       color=count_color)
+        axc.tick_params(axis='y', colors=count_color, length=0)
+    else:
+        # right-axis category labels at each band's mid-height in the LAST tranche
+        last = shares[:, -1]; mids = np.cumsum(last) - last / 2
+        axr = ax.twinx(); axr.set_ylim(0, 1); axr.set_yticks(mids)
+        axr.set_yticklabels([c.upper() for c in cats]); axr.tick_params(length=0)
 
-    ax.legend(loc='upper left', bbox_to_anchor=(1.28, 1.0), frameon=False, fontsize=8)
+    handles, labels = ax.get_legend_handles_labels()
+    if show_count_line:   # lives on the twin axis, so add it to the legend by hand
+        from matplotlib.lines import Line2D
+        handles.append(Line2D([0], [0], color=count_color, lw=2, marker='o', ms=4))
+        labels.append('compounds (cumulative n)' if cumulative else 'compounds (n)')
+    ax.legend(handles, labels, loc='upper left', bbox_to_anchor=(1.28, 1.0),
+              frameon=False, fontsize=8)
 
     summary = pd.DataFrame(shares.T, index=[pd.Timestamp(d) for d in dates], columns=cats)
     summary.insert(0, 'n', ns); summary.index.name = date_col
@@ -858,7 +933,8 @@ def plot_activity_area_absolute(
         MS, date_col='date', activity_col='activity',
         cats=('Silent', 'Single (1)', 'Low (2-10)', 'Medium (11-25)', 'High (>25)'),
         colors=None, cumulative=True, annotate_total=True,
-        show_rate_line=True, silent_label='Silent', rate_color='#1d3557',
+        show_rate_line=True, show_silent_line=False,
+        silent_label='Silent', rate_color='#1d3557',
         date_format='%Y-%m-%d', figsize=None, dpi=150, ax=None):
     """
     **Absolute** (count, not 100%-normalised) stacked area of MS activity
@@ -890,6 +966,10 @@ def plot_activity_area_absolute(
         on a right-hand 0–100% axis (same definition as the area view; computed
         per tranche, not cumulatively, so the trend isn't flattened by the first
         large tranche).
+    :param bool show_silent_line: trace a discreet white line along the **top of
+        the silent band** (= cumulative silent count) and label each point with
+        the silent share of the library to date. Reads the composition off the
+        same count axis, so no second y-scale is needed.
     :param str silent_label: inactive label (the rate is the non-silent share).
     :param str rate_color: colour of the activity-rate line / right axis.
     :param str date_format: strftime format for the x-tick dates (e.g. ``'%Y-%m'``
@@ -950,10 +1030,24 @@ def plot_activity_area_absolute(
     if annotate_total:
         # tuck totals just below their markers so they clear the rate-line labels
         for j in (0, len(dates) - 1):
+            # nudge the end labels inward so they don't spill past the axes
+            _ha, _dx = ('left', 4) if j == 0 else ('right', -4)
             ax.annotate(f'{int(totals[j]):,}', (x[j], totals[j]),
-                        textcoords='offset points', xytext=(0, -13), va='top',
-                        ha='center', fontsize=11, fontweight='bold', color=_TOTAL_C,
+                        textcoords='offset points', xytext=(_dx, -13), va='top',
+                        ha=_ha, fontsize=11, fontweight='bold', color=_TOTAL_C,
                         path_effects=[pe.withStroke(linewidth=3, foreground=_BG)])
+
+    # discreet white boundary on top of the silent band, labelled with the silent share
+    if show_silent_line:
+        silent_top = counts[:cats.index(silent_label) + 1].sum(axis=0)
+        ax.plot(x, silent_top, color='white', lw=1.5, alpha=0.9, zorder=6)
+        for j in range(len(dates)):
+            # nudge the end labels inward so they don't spill past the axes
+            _ha, _dx = ('left', 4) if j == 0 else ('right', -4) if j == len(dates) - 1 else ('center', 0)
+            ax.annotate(f'{silent_top[j] / totals[j]:.0%} silent', (x[j], silent_top[j]),
+                        textcoords='offset points', xytext=(_dx, 5), va='bottom', ha=_ha,
+                        fontsize=8, color='white', zorder=7,
+                        path_effects=[pe.withStroke(linewidth=2, foreground=(0, 0, 0, 0.35))])
 
     ax.set_xlim(x[0], x[-1]); ax.set_ylim(0, totals.max() * 1.12)
     ax.set_xticks(x)

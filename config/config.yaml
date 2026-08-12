@@ -12,8 +12,11 @@ SERAC_C:                    # named palette: name -> hex (quote hex; '#' is a YA
   terracotta: '#EEA090'
   gold: '#E8B04B'
   olive: '#74B24A'
-  sky_blue: '#A6C8E4'
+  cornflowerblue: '#A6C8E4'
   paper: '#E3E0DA'
+  light_blue: '#CAEEFB'
+  sky_blue: '#96DCF8'
+
 
 # Dropbox access over SSH — pull/push company-Dropbox files from machines without the desktop client.
 # The path keys below (PATENTS_RAW, PX_*, DROPBOX_*, FBX_DIR, ENAMINE_*, STOCK_INVENTORY, ...) are
@@ -66,11 +69,14 @@ OT_ROOT: data/external/opentarget
 PHARMA_PATENT_CSV: data/patent/20260528_pharma_sm.csv
 BMS_GENES: data/patent/BMS_Pipeline_genes.csv
 OT_CACHE: output/MS/opentargets_target_disease.parquet
-GENE_SAR_OUT: output/MS/20260529_geneSAR_R2_full_genome.csv
+GENE_SAR_OUT: output/MS/20260812_geneSAR_R2_full_genome.csv   # per-gene screen results (resumable: delete to redo)
 MCS_CSV: output/MS/20260505_target_final_mcs.csv
 ML_MODEL_OUTPUT: output/ML/trained_models/20260617_select_genes # date should match that of last MS tranche
 
-FEATURES_TYPE: prevalence
+# chemistry feature set: prevalence (H236 with Morgan bits >2% kept) | H236 (full universe)
+# | H237 (H236 + descriptastorus RDKit2D 'DS_*' descriptors; needs the descriptastorus pip pkg)
+# | autoresearch (pickled features) | anything else -> Morgan bits + physchem properties
+FEATURES_TYPE: H237 # prevalence
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
 CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
@@ -103,5 +109,5 @@ STOCK_PWS: WX-SRCBS
 STOCK_SHEET: Solid(II)
 STOCK_ID_COL: Batch Molecule Batch ID   # batch id (SRB-XXXXXXX-NNN); compound = its SRB-XXXXXXX prefix
 
-CHEMLIB_OVERWRITE: true
-DFRAW_OVERWRITE: true
+CHEMLIB_OVERWRITE: false
+DFRAW_OVERWRITE: false
