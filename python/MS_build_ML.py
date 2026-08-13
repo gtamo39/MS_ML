@@ -19,7 +19,7 @@ from rdkit import Chem
 import yaml
 from joblib import parallel_config
 from scipy.stats import pearsonr, spearmanr
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import KFold
 from tqdm import tqdm
 tqdm.pandas()
@@ -28,6 +28,7 @@ tqdm.pandas()
 import python.functions as fn
 import Rdkit_tools as rdkit_tools
 import ML_Reg as ML_Reg
+import ML_Class as ML_Class
 import Statistics_tools as stats_tools
 from get_library import get_df   # CDD Vault collection export
 from mltrail import Registry     # model registry (add / predict / trail)
@@ -61,6 +62,17 @@ PHARMA_DROP_AREAS = {'phenotype', 'measurement', 'biological_process',
 GENE_SCREEN_RF = {'n_estimators': 100, 'max_depth': 20, 'max_features': 0.3,
                   'min_samples_leaf': 2, 'min_samples_split': 4}
 GENE_SCREEN_COLS = ['gene', 'R2', 'n', 'pearson_r', 'pearson_p', 'spearman_r', 'spearman_p']
+
+# cm2rm blacklist parts, in the order they are concatenated. Also the fallback when neither the
+# caller nor config CM2RM_PARTS names a subset.
+CM2RM_PARTS = ('fbx_independent', 'control_compounds', 'contaminants')
+
+# Deployable activity classifiers as prototyped in MS_ActivityClass. RF, not the HGBC the older
+# 1-12 / not-high entries use — hence the _rf suffix on the registry names.
+ACTIVITY_RF = {'n_estimators': 200, 'class_weight': 'balanced', 'n_jobs': 16, 'random_state': 0}
+# fallback registry names; config's NON_SILENT_MODEL_NAME / SINGLELOW_MODEL_NAME win when present
+NON_SILENT_NAME = 'Px_activity_non_silent_rf'
+SINGLE_LOW_NAME = 'Px_activity_1_12_rf'
 
 # ---------- state shared with the screen workers via fork() (copy-on-write, no pickling) ----------
 _SCREEN = {}
@@ -232,16 +244,19 @@ class DATA():
         print(f'> Chemical lib dim: {self.serac_df.shape} | '
               f'{len(self.validated_targets)} validated / {len(self.devalidated_targets)} devalidated targets')
 
-    def get_contaminants_and_controls(self, params, parts=('fbx_independent', 'control_compounds', 'contaminants')):
+    def get_contaminants_and_controls(self, params, parts=None):
         """
         -List the control compounds (config CONTROLS), the contaminants (config CONTAMINANTS) and the
          FBX-independent compounds (ligase-independent or not WT-validated), then build the blacklist
-         cm2rm from the subset named in `parts` (MS_ActivityClass drops all three, MS_TargetML only
-         the contaminants).
-        param class params: PARAMS instance (CONTROLS, CONTAMINANTS)
-        param tuple parts: which of control_compounds / contaminants / fbx_independent enter cm2rm
+         cm2rm from the subset named in `parts`.
+        param class params: PARAMS instance (CONTROLS, CONTAMINANTS, CM2RM_PARTS)
+        param tuple parts: which of control_compounds / contaminants / fbx_independent enter cm2rm;
+                           None -> config CM2RM_PARTS, else the module default CM2RM_PARTS (all three)
         return None:
         """
+        parts = tuple(parts or getattr(params, 'CM2RM_PARTS', None) or CM2RM_PARTS)
+        if set(parts) - set(CM2RM_PARTS):
+            raise ValueError(f'unknown cm2rm part(s) {sorted(set(parts) - set(CM2RM_PARTS))}; pick from {CM2RM_PARTS}')
         sdf = self.serac_df
         self.control_compounds = list(params.CONTROLS)
         self.contaminants      = list(pd.read_csv(params.CONTAMINANTS)['Molecule Name'])
@@ -257,13 +272,16 @@ class DATA():
          from the three CDD/Database tranches plus every FBX tranche under FBX_DIR, collapse to the
          latest batch/date per compound, drop controls+contaminants and non-library compounds, then
          cache both to DFRAW_PATH / MS_PATH. Otherwise read the cached parquets.
-        param class params: PARAMS instance (DFRAW_OVERWRITE, RAW_/CLEAN_PROTEOMICS_PATH, PX_*, FBX_DIR, MS_PATH, DFRAW_PATH)
+        -Either way, config EXCLUDE_DATES tranches are then dropped from df_raw (see
+         drop_excluded_dates) — in memory, never from the cache.
+        param class params: PARAMS instance (DFRAW_OVERWRITE, RAW_/CLEAN_PROTEOMICS_PATH, PX_*, FBX_DIR, MS_PATH, DFRAW_PATH, EXCLUDE_DATES)
         return None:
         """
         if not params.DFRAW_OVERWRITE:
             self.MS     = pd.read_parquet(params.MS_PATH)
             self.df_raw = pd.read_parquet(params.DFRAW_PATH)
             print(f'> loaded cached MS {self.MS.shape} | df_raw {self.df_raw.shape}')
+            self.drop_excluded_dates(params)
             return
 
         # -------------------
@@ -367,6 +385,26 @@ class DATA():
         self.MS.to_parquet(params.MS_PATH, index=False)
         self.df_raw.to_parquet(params.DFRAW_PATH, index=False)
         print(f'> rebuilt MS {self.MS.shape} -> {params.MS_PATH} | df_raw {self.df_raw.shape} -> {params.DFRAW_PATH}')
+        self.drop_excluded_dates(params)
+
+    def drop_excluded_dates(self, params):
+        """
+        -Drop the screen dates listed in config EXCLUDE_DATES from df_raw, so every downstream
+         model (notably the per-gene screen) ignores those tranches. Applied AFTER caching, i.e.
+         in memory only: the parquet keeps every date, so emptying the key restores them.
+        -MS is deliberately left alone — the activity-composition plots exclude dates themselves,
+         and dropping compounds there would silently shrink the classifiers' training set.
+        param class params: PARAMS instance (EXCLUDE_DATES)
+        return None:
+        """
+        dates = pd.to_datetime(getattr(params, 'EXCLUDE_DATES', None) or [])
+        if not len(dates):
+            return
+        # both sides must be datetime64 — isin() against a list of date STRINGS never matches
+        drop = pd.to_datetime(self.df_raw['date']).isin(dates)
+        print(f'> EXCLUDE_DATES {[d.strftime("%Y-%m-%d") for d in dates]}: dropped {drop.sum():,} df_raw '
+              f'rows / {self.df_raw.loc[drop, "compound"].nunique():,} compounds (MS untouched)')
+        self.df_raw = self.df_raw[~drop]
 
     def load_opentargets(self, params):
         """
@@ -455,6 +493,109 @@ class DATA():
 class OUTPUT():
     def __init__(self):
         self.gene_metrics = None
+        self.non_silent_cv = None
+        self.non_silent_model_id = None
+        self.single_low_cv = None
+        self.single_low_model_id = None
+
+    def save_non_silent_model(self, data, params, model=None, folds=5, name=None,
+                              overwrite=False):
+        """
+        -Train and register the deployable non-silent ("active") binary classifier:
+         label = ndown > 0 over the whole library (see _save_activity_model for the rest).
+        param class data: DATA instance (MS, MF_features, serac_df)
+        param class params: PARAMS instance (registry, FEATURES_TYPE, NON_SILENT_MODEL_NAME)
+        param model: sklearn classifier; None -> RandomForestClassifier(**ACTIVITY_RF)
+        param str name: MLTrail experiment_name; None -> config NON_SILENT_MODEL_NAME
+        param bool overwrite: reset the latest version instead of appending one
+        return None: metrics land in self.non_silent_cv, the id in self.non_silent_model_id
+        """
+        self.non_silent_cv, self.non_silent_model_id = self._save_activity_model(
+            data, params, label=(data.MS['ndown'] > 0),
+            name=name or getattr(params, 'NON_SILENT_MODEL_NAME', NON_SILENT_NAME),
+            task='activity_non_silent_binary', positive='ndown > 0',
+            model=model, folds=folds, overwrite=overwrite)
+
+    def save_single_low_model(self, data, params, model=None, folds=5, name=None,
+                              overwrite=False):
+        """
+        -Train and register the deployable single/low-activity binary classifier:
+         label = 1 <= ndown <= 12, i.e. compounds that degrade something but stay selective —
+         the positives silent-vs-active can't separate (see _save_activity_model for the rest).
+        param class data: DATA instance (MS, MF_features, serac_df)
+        param class params: PARAMS instance (registry, FEATURES_TYPE, SINGLELOW_MODEL_NAME)
+        param model: sklearn classifier; None -> RandomForestClassifier(**ACTIVITY_RF)
+        param str name: MLTrail experiment_name; None -> config SINGLELOW_MODEL_NAME
+        param bool overwrite: reset the latest version instead of appending one
+        return None: metrics land in self.single_low_cv, the id in self.single_low_model_id
+        """
+        self.single_low_cv, self.single_low_model_id = self._save_activity_model(
+            data, params, label=data.MS['ndown'].between(1, 12),
+            name=name or getattr(params, 'SINGLELOW_MODEL_NAME', SINGLE_LOW_NAME),
+            task='activity_single_low_binary', positive='1 <= ndown <= 12',
+            model=model, folds=folds, overwrite=overwrite)
+
+    def _save_activity_model(self, data, params, label, name, task, positive, model=None,
+                             folds=5, overwrite=False):
+        """
+        -Train and register one deployable binary activity classifier: the caller supplies the
+         label mask over data.MS, features are MF_features (whatever FEATURES_TYPE is).
+        -Score it by `folds`-fold CV first (roc_auc / pr_auc go into the registry as the entry's
+         metrics), then refit on the whole library and hand the {model, feature_cols} bundle
+         to MLTrail together with the compound/smiles/label training set, so predictions on new
+         SMILES are re-featurized by MLTrail's own featurizer for this FEATURES_TYPE.
+        -Re-running adds a NEW VERSION to the existing entry of that name (history is kept);
+         `overwrite=True` resets the latest version in place instead — use that only to correct
+         a bad version, never for a retrain.
+        param series label: boolean mask over data.MS's rows defining the positive class
+        param str name: MLTrail experiment_name (the entry the version is appended to)
+        param str task/positive: bundle metadata documenting what was learnt
+        return tuple: (CV metrics dict, MLTrail model id)
+        """
+        ML_data = data.MS.copy()
+        ML_data['label'] = np.asarray(label, dtype=int)   # positional: MS may carry a duplicated index
+        ML_data = pd.merge(ML_data[['compound', 'label']], data.MF_features, on='compound')
+        feat_cols = [c for c in ML_data.columns if c not in ('compound', 'label')]
+        print(f'> {name}: {len(ML_data):,} rows | features={len(feat_cols):,} ({params.FEATURES_TYPE})')
+        print(ML_data['label'].value_counts().to_string())
+
+        clf = model if model is not None else RandomForestClassifier(**ACTIVITY_RF)
+
+        ## CV metrics for the registry
+        _, cv_pred = ML_Class.run_K_Fold_Xval_Classification(
+            ML_data, ID='compound', model=clf, folds=folds, col_to_rm=['compound', 'label'],
+            v=False, ctf=0.5, impute_by_mean=False)
+        cv = ML_Class.metrics_from_pred_df(cv_pred)
+        print(f"> CV roc_auc={cv['roc_auc']:.3f}  pr_auc={cv['pr_auc']:.3f}")
+
+        ## refit on the whole library; MLTrail joblib-dumps the bundle into the vault
+        clf.fit(ML_data[feat_cols], ML_data['label'])
+        bundle = {'model': clf, 'feature_cols': feat_cols, 'task': task,
+                  'positive': positive, 'features': params.FEATURES_TYPE, 'n_train': len(ML_data),
+                  'class_counts': ML_data['label'].value_counts().to_dict(),
+                  'sklearn_ver': __import__('sklearn').__version__}
+
+        ## training set archived alongside the model — compound/smiles/label only, features
+        ## are reconstructible from the smiles by MLTrail's featurizer
+        train_set = ML_data[['compound', 'label']].merge(
+            data.serac_df[['compound', 'smiles']].drop_duplicates('compound'), on='compound')
+
+        ## version the existing entry of this name rather than spawning a duplicate id
+        hit = params.registry.list().pipe(lambda d: d.loc[d['experiment_name'] == name, 'id'])
+        model_id = int(hit.iloc[0]) if len(hit) else None
+        new_id = params.registry.add(
+            model_id=model_id, overwrite=overwrite and model_id is not None, model=bundle,
+            experiment_name=name, experiment_measure='proteomics_activity',
+            unit='n_proteins_down', model_type='single_task_classification',
+            framework='sklearn', features_type=params.FEATURES_TYPE,
+            training_set=train_set, smiles_column='smiles',
+            compound_id_column='compound', label_column='label',
+            metrics={'roc_auc': round(cv['roc_auc'], 3), 'pr_auc': round(cv['pr_auc'], 3)})
+        action = ('overwrote latest version of' if (overwrite and model_id) else
+                  'new version of' if model_id else 'registered')
+        print(f'> {action} MLTrail model id={new_id} "{name}" '
+              f'({len(train_set):,} training rows archived)')
+        return cv, new_id
 
     def run_gene_screen(self, data, params, genes, out_path=None, model_params=None, folds=5,
                         min_compounds=20, n_processes=None, n_jobs_per_process=8, seed=0, resume=True):
@@ -540,12 +681,19 @@ if __name__ == "__main__":
     ap.add_argument('--genes', default=None,
                     help="run the per-gene screen on these genes: a comma-separated list, a file with "
                          "one gene per line, or 'all' / 'top:<N>' for the genes with the most compounds")
-    ap.add_argument('--cm2rm', default='contaminants',
-                    help="comma-separated blacklist parts: contaminants | control_compounds | fbx_independent")
+    ap.add_argument('--cm2rm', default=None,
+                    help="comma-separated blacklist parts (default: config CM2RM_PARTS): "
+                         "contaminants | control_compounds | fbx_independent")
     ap.add_argument('--n_processes', type=int, default=None, help="genes screened concurrently (default: 8)")
     ap.add_argument('--n_jobs', type=int, default=8, help="RF threads inside each worker")
     ap.add_argument('--min_compounds', type=int, default=20,
                     help="skip the CV for genes with fewer compounds than this (NaN metrics row, n kept)")
+    ap.add_argument('--save_non_silent', action='store_true',
+                    help="train the non-silent (ndown > 0) classifier and register it in MLTrail")
+    ap.add_argument('--save_single_low', action='store_true',
+                    help="train the single/low (1 <= ndown <= 12) classifier and register it in MLTrail")
+    ap.add_argument('--overwrite', action='store_true',
+                    help="--save_*: reset the latest version in place instead of appending one")
     args = ap.parse_args()
 
     ## params:
@@ -557,11 +705,13 @@ if __name__ == "__main__":
     ## data:
     data = DATA()
     data.load_chemical_lib_df(params)
-    data.get_contaminants_and_controls(params, parts=tuple(args.cm2rm.split(',')))
+    data.get_contaminants_and_controls(params, parts=tuple(args.cm2rm.split(',')) if args.cm2rm else None)
     data.load_proteomics_data(params)
     data.compute_features(params)
 
     ## output:
+    output = OUTPUT()
+
     if args.genes:
         if os.path.exists(args.genes):
             genes = [g.strip() for g in open(args.genes) if g.strip()]
@@ -570,6 +720,11 @@ if __name__ == "__main__":
             genes = list(counts.index if args.genes == 'all' else counts.index[:int(args.genes.split(':')[1])])
         else:
             genes = [g.strip() for g in args.genes.split(',') if g.strip()]
-        output = OUTPUT()
         output.run_gene_screen(data, params, genes, min_compounds=args.min_compounds,
                                n_processes=args.n_processes, n_jobs_per_process=args.n_jobs)
+
+    if args.save_non_silent:
+        output.save_non_silent_model(data, params, overwrite=args.overwrite)
+
+    if args.save_single_low:
+        output.save_single_low_model(data, params, overwrite=args.overwrite)

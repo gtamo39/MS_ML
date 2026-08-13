@@ -33,6 +33,96 @@ values), and are prefixed `DS_` because descriptastorus emits names that would o
 H236's own `TPSA` / `LogP` columns. `descriptastorus` is in `requirements.txt` but is **not on PyPI**, so
 it is pinned as a git URL; it runs fully offline with no telemetry and no downloaded weights.
 
+### Building the models (`python/MS_build_ML.py`)
+-------------------------------------------------
+
+Same classes drive the notebook and the CLI (mirrors `../Px_interface/python/Px_interface.py`):
+`PARAMS` (YAML → attributes, Dropbox readers, MLTrail handle) → `DATA` (library, proteomics,
+features) → `OUTPUT` (screens + deployable models). The module self-locates the repo root, so it
+runs from anywhere. In a notebook:
+
+```python
+from python.MS_build_ML import PARAMS, DATA, OUTPUT
+params = PARAMS('config/config.yaml'); params.load_params(); params.setup_dropbox(); params.load_registry()
+data = DATA(); data.load_chemical_lib_df(params); data.get_contaminants_and_controls(params)
+data.load_proteomics_data(params); data.compute_features(params)
+output = OUTPUT()
+```
+
+**Register the deployable activity classifiers in MLTrail** — both are `RandomForestClassifier(
+n_estimators=200, class_weight='balanced')` on `MF_features`, differing only in the label: 5-fold CV
+for the `roc_auc` / `pr_auc` metrics, refit on the whole library, then the `{model, feature_cols}`
+bundle plus the `compound/smiles/label` training set go into the vault.
+
+| flag | label | config key |
+|---|---|---|
+| `--save_non_silent` | active: `ndown > 0` | `NON_SILENT_MODEL_NAME` |
+| `--save_single_low` | selective: `1 <= ndown <= 12` | `SINGLELOW_MODEL_NAME` |
+
+```bash
+python python/MS_build_ML.py --config config/config.yaml --save_non_silent --save_single_low
+```
+```python
+output.save_non_silent_model(data, params)                      # same thing from the notebook
+output.save_single_low_model(data, params)
+output.save_single_low_model(data, params, model=my_clf)        # try another estimator
+output.save_single_low_model(data, params, overwrite=True)      # CORRECT the latest version in place
+```
+
+Both flags share one process on purpose — **never run two saves concurrently**: `Registry` reads the
+whole vault JSON at construction and writes it back whole, so two handles racing on it collide on
+`next_id` and the last writer wins.
+
+The registry names come from the `Saved MLTrail models` block of `config.yaml` (`name=...` overrides
+per call). Re-running **appends a new version to the same id** — matched on that name — so the trail
+keeps the performance history; pass `--overwrite` only to replace a bad version. **Renaming a key
+therefore starts a fresh entry** rather than versioning the old one, so keep it stable unless that is
+what you want. `features_type` is taken from `FEATURES_TYPE`, and MLTrail re-derives the features
+from SMILES at predict time — so the featurizer must exist there for that type (`MF_2048`, `H236`,
+`H237`).
+
+**Check what landed in the vault** — `mltrail` is a console script installed with the package, so
+these work from any directory (add `--config` to hit a non-default vault):
+
+```bash
+mltrail --list                                    # id, date, experiment_name, measure
+mltrail --search --experiment_name Px_activity_1_12_rf_H237         # find the id by name
+mltrail --details --id <id>                       # every attribute of the latest version
+mltrail --trail --metrics roc_auc --id <id>       # the metric across versions
+```
+
+**Per-gene logfc screen** (label = per-compound mean of `logfc` clipped at 0, 5-fold CV RF), written
+to `GENE_SAR_OUT` one gene at a time and **resumable** — genes already in the file are skipped, so
+delete it to force a full redo. ⚠ That skip is why a **changed cohort needs a new `GENE_SAR_OUT`
+filename**: re-running into a file written under different settings keeps its rows and silently
+mixes two datasets. Two config keys define the cohort, both applied at import:
+
+| key | effect |
+|---|---|
+| `EXCLUDE_DATES` | screen dates dropped from `df_raw` (`DATA.drop_excluded_dates`) — in memory, the parquet keeps them. `MS` is untouched, so the classifiers still see those compounds |
+| `CM2RM_PARTS` | which blacklists build `cm2rm`: any subset of `contaminants` / `control_compounds` / `fbx_independent`. `--cm2rm a,b` overrides it |
+
+```bash
+python python/MS_build_ML.py --genes KDM1B,CIT           # a list, a file (one gene/line), or top:200 / all
+python python/MS_build_ML.py --genes all --min_compounds 1000 --n_processes 8 --n_jobs 8
+```
+
+For the whole genome (~12k genes, ~17 h) run it detached:
+
+```bash
+screen -dmS gene_screen bash -c '
+  source ~/miniconda3/etc/profile.d/conda.sh && conda activate ML && cd /home/gtamo/MS_ML
+  python python/MS_build_ML.py --genes all --min_compounds 1000 \
+      --n_processes 8 --n_jobs 8 2>&1 | tee output/MS/gene_screen.log'
+```
+
+**`--n_processes 8 --n_jobs 8` is the measured optimum on this box, not a guess** — throughput
+saturates on the memory subsystem, not on cores, so filling all 256 threads is *slower* (32×8 =
+6.95 s/gene vs 8×8 = 5.81). Two gotchas the code guards against: sklearn's default loky backend
+silently degrades to `n_jobs=1` inside a `multiprocessing` worker (hence the `parallel_config(
+backend='threading')` wrapper), and `RandomForestRegressor` with `n_jobs>1` is not bit-reproducible
+(~2e-16 from parallel `predict` accumulation), so re-runs won't reproduce the last digits of R².
+
 ### Pulling data files from Dropbox
 -----------------------------------
 

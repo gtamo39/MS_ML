@@ -69,7 +69,6 @@ OT_ROOT: data/external/opentarget
 PHARMA_PATENT_CSV: data/patent/20260528_pharma_sm.csv
 BMS_GENES: data/patent/BMS_Pipeline_genes.csv
 OT_CACHE: output/MS/opentargets_target_disease.parquet
-GENE_SAR_OUT: output/MS/20260812_geneSAR_R2_full_genome.csv   # per-gene screen results (resumable: delete to redo)
 MCS_CSV: output/MS/20260505_target_final_mcs.csv
 ML_MODEL_OUTPUT: output/ML/trained_models/20260617_select_genes # date should match that of last MS tranche
 
@@ -95,9 +94,15 @@ SIG_MAX_ABS_NES: 2.0          # require peak |GSEA NES| >= this across the funct
 SIG_K: 2                      # number of cell-signature classes (KMeans on the NES vectors)
 
 CONTAMINANTS: data/MS/20260611_contaminants.csv
-CONTROLS: 
+CONTROLS:
 - SRB-0000692
 - SRB-0000615
+
+# which blacklists are concatenated into cm2rm (the compounds dropped from every training set).
+# Any subset of: fbx_independent (serac_df Px_Ligase_dependent == 0 or Px_validated_WT == 0) |
+# control_compounds (CONTROLS above) | contaminants (the CONTAMINANTS csv). A `parts=` argument
+# to DATA.get_contaminants_and_controls, or --cm2rm on the CLI, overrides this.
+CM2RM_PARTS: [contaminants, fbx_independent]
 
 # disease association research:
 FUNC_ENRICH_PATH: output/cell_signature/compound_function_enrichment.parquet
@@ -109,5 +114,12 @@ STOCK_PWS: WX-SRCBS
 STOCK_SHEET: Solid(II)
 STOCK_ID_COL: Batch Molecule Batch ID   # batch id (SRB-XXXXXXX-NNN); compound = its SRB-XXXXXXX prefix
 
+GENE_SAR_OUT: output/MS/20260812_geneSAR_R2_full_genome.csv   # per-gene screen results (resumable: delete to redo)
+EXCLUDE_DATES: ['2026-08-13']
+
 CHEMLIB_OVERWRITE: false
 DFRAW_OVERWRITE: false
+
+# Saved MLTrail models:
+NON_SILENT_MODEL_NAME: Px_activity_non_silent_rf_H237
+SINGLELOW_MODEL_NAME: Px_activity_1_12_rf_H237 
