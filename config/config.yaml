@@ -74,8 +74,7 @@ ML_MODEL_OUTPUT: output/ML/trained_models/20260617_select_genes # date should ma
 
 # chemistry feature set: prevalence (H236 with Morgan bits >2% kept) | H236 (full universe)
 # | H237 (H236 + descriptastorus RDKit2D 'DS_*' descriptors; needs the descriptastorus pip pkg)
-# | autoresearch (pickled features) | anything else -> Morgan bits + physchem properties
-FEATURES_TYPE: H237 # prevalence
+# | autoresearch (pickled 
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
 CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
@@ -115,11 +114,12 @@ STOCK_SHEET: Solid(II)
 STOCK_ID_COL: Batch Molecule Batch ID   # batch id (SRB-XXXXXXX-NNN); compound = its SRB-XXXXXXX prefix
 
 GENE_SAR_OUT: output/MS/20260812_geneSAR_R2_full_genome.csv   # per-gene screen results (resumable: delete to redo)
-EXCLUDE_DATES: ['2026-08-13']
+EXCLUDE_DATES: ['2026-08-13']   # tranches dropped from df_raw AND MS at load (in memory; parquets keep them)
 
 CHEMLIB_OVERWRITE: false
 DFRAW_OVERWRITE: false
 
 # Saved MLTrail models:
+FEATURES_TYPE: H237 # prevalence
 NON_SILENT_MODEL_NAME: Px_activity_non_silent_rf_H237
 SINGLELOW_MODEL_NAME: Px_activity_1_12_rf_H237 

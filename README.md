@@ -61,7 +61,12 @@ bundle plus the `compound/smiles/label` training set go into the vault.
 
 ```bash
 python python/MS_build_ML.py --config config/config.yaml --save_non_silent --save_single_low
+python python/MS_build_ML.py --config config/config.yaml --save_non_silent --comment 'H237, cohort minus 2026-08-13'
 ```
+
+`--comment` stores a free-text note **on the version being written**, next to its metrics, so each
+version can record what changed. Omit it and MLTrail leaves the field out.
+
 ```python
 output.save_non_silent_model(data, params)                      # same thing from the notebook
 output.save_single_low_model(data, params)
@@ -95,12 +100,21 @@ mltrail --trail --metrics roc_auc --id <id>       # the metric across versions
 to `GENE_SAR_OUT` one gene at a time and **resumable** — genes already in the file are skipped, so
 delete it to force a full redo. ⚠ That skip is why a **changed cohort needs a new `GENE_SAR_OUT`
 filename**: re-running into a file written under different settings keeps its rows and silently
-mixes two datasets. Two config keys define the cohort, both applied at import:
+mixes two datasets.
+
+**Every config key this module reads.** The first two define the cohort and apply at import, so they
+affect the screen and the classifiers alike; the last two only name the registry entries:
 
 | key | effect |
 |---|---|
-| `EXCLUDE_DATES` | screen dates dropped from `df_raw` (`DATA.drop_excluded_dates`) — in memory, the parquet keeps them. `MS` is untouched, so the classifiers still see those compounds |
+| `EXCLUDE_DATES` | screen dates dropped from `df_raw` **and** `MS` (`DATA.drop_excluded_dates`) — in memory, the parquets keep them, so emptying the key restores them without a rebuild. The gene screen and the classifiers share one cohort |
 | `CM2RM_PARTS` | which blacklists build `cm2rm`: any subset of `contaminants` / `control_compounds` / `fbx_independent`. `--cm2rm a,b` overrides it |
+| `NON_SILENT_MODEL_NAME` | MLTrail `experiment_name` for the `ndown > 0` classifier (`--save_non_silent`) |
+| `SINGLELOW_MODEL_NAME` | MLTrail `experiment_name` for the `1 <= ndown <= 12` classifier (`--save_single_low`) |
+
+⚠ A model name is also its version key: the same name appends a version to that id, a new name
+starts a new id. There is no CLI flag for it — edit the key, pass a different `--config`, or use
+`name=...` from the notebook.
 
 ```bash
 python python/MS_build_ML.py --genes KDM1B,CIT           # a list, a file (one gene/line), or top:200 / all
@@ -122,6 +136,12 @@ saturates on the memory subsystem, not on cores, so filling all 256 threads is *
 silently degrades to `n_jobs=1` inside a `multiprocessing` worker (hence the `parallel_config(
 backend='threading')` wrapper), and `RandomForestRegressor` with `n_jobs>1` is not bit-reproducible
 (~2e-16 from parallel `predict` accumulation), so re-runs won't reproduce the last digits of R².
+
+A third one is **cosmetic and already silenced** in `_init_screen_worker`: `` `sklearn.utils.parallel.delayed`
+should be used with `sklearn.utils.parallel.Parallel` ``. sklearn emits it when the `warnings.filters`
+snapshot it captured was empty — and `_FuncWrapper` clears that *global* list on every task, so the
+threading backend's 8 threads race into an empty snapshot constantly (123,720 lines / 39 MB in one
+log). Unlike the loky warning it costs nothing: the config still propagates and the R² is identical.
 
 ### Pulling data files from Dropbox
 -----------------------------------

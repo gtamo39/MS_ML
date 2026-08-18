@@ -767,8 +767,8 @@ def plot_activity_composition_over_time(
                         path_effects=[pe.withStroke(linewidth=2, foreground=(0, 0, 0, 0.35))])
 
     ax.set_ylim(0, 1); ax.set_xlim(x[0], x[-1])
-    ax.set_yticks([0, .25, .5, .75, 1])
-    ax.set_yticklabels(['0%', '25%', '50%', '75%', '100%'])
+    ax.set_yticks(np.arange(0, 1.001, .2))
+    ax.set_yticklabels([f'{v:.0%}' for v in np.arange(0, 1.001, .2)])
     ax.set_ylabel('share'); ax.set_xlabel('MS tranche')
     ax.set_xticks(x)
     # the count line already carries n at each point — don't repeat it under the date

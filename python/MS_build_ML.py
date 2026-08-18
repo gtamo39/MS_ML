@@ -7,7 +7,7 @@ os.chdir(_REPO_ROOT)
 sys.path.insert(0, os.path.join(os.path.dirname(_REPO_ROOT), 'Scripts'))  # shared helpers (Rdkit_tools, ML_Class, ...)
 sys.path.insert(0, os.path.expanduser('~/CDD_Vault_API/python'))          # CDD Vault API (get_df)
 
-import re, gc, csv, json, time, pickle, importlib, argparse
+import re, gc, csv, json, time, pickle, importlib, argparse, warnings
 import multiprocessing as mp
 import numpy as np
 import pandas as pd
@@ -80,6 +80,11 @@ _SCREEN = {}
 
 def _init_screen_worker(state):
     """Inherited via fork() — populate the module-level worker state (no pickling)."""
+    # cosmetic only: sklearn warns whenever the warnings.filters snapshot it captured was empty,
+    # which the threading backend races into constantly (_FuncWrapper resets that GLOBAL list per
+    # task). The config still propagates — this filter both silences the message and keeps the
+    # list non-empty, which is the condition being tested.
+    warnings.filterwarnings('ignore', message='.*sklearn.utils.parallel.delayed.*')
     _SCREEN.update(state)
 
 
@@ -389,11 +394,10 @@ class DATA():
 
     def drop_excluded_dates(self, params):
         """
-        -Drop the screen dates listed in config EXCLUDE_DATES from df_raw, so every downstream
-         model (notably the per-gene screen) ignores those tranches. Applied AFTER caching, i.e.
-         in memory only: the parquet keeps every date, so emptying the key restores them.
-        -MS is deliberately left alone — the activity-composition plots exclude dates themselves,
-         and dropping compounds there would silently shrink the classifiers' training set.
+        -Drop the screen dates listed in config EXCLUDE_DATES from BOTH df_raw and MS, so the
+         per-gene screen and the activity classifiers see the same tranches. Applied AFTER
+         caching, i.e. in memory only: the parquets keep every date, so emptying the key
+         restores them without a rebuild.
         param class params: PARAMS instance (EXCLUDE_DATES)
         return None:
         """
@@ -401,10 +405,11 @@ class DATA():
         if not len(dates):
             return
         # both sides must be datetime64 — isin() against a list of date STRINGS never matches
-        drop = pd.to_datetime(self.df_raw['date']).isin(dates)
-        print(f'> EXCLUDE_DATES {[d.strftime("%Y-%m-%d") for d in dates]}: dropped {drop.sum():,} df_raw '
-              f'rows / {self.df_raw.loc[drop, "compound"].nunique():,} compounds (MS untouched)')
-        self.df_raw = self.df_raw[~drop]
+        drop_raw = pd.to_datetime(self.df_raw['date']).isin(dates)
+        drop_ms  = pd.to_datetime(self.MS['date']).isin(dates)
+        print(f'> EXCLUDE_DATES {[d.strftime("%Y-%m-%d") for d in dates]}: dropped {drop_raw.sum():,} df_raw rows '
+              f'/ {drop_ms.sum():,} MS compounds')
+        self.df_raw, self.MS = self.df_raw[~drop_raw], self.MS[~drop_ms]
 
     def load_opentargets(self, params):
         """
@@ -499,7 +504,7 @@ class OUTPUT():
         self.single_low_model_id = None
 
     def save_non_silent_model(self, data, params, model=None, folds=5, name=None,
-                              overwrite=False):
+                              overwrite=False, comment=None):
         """
         -Train and register the deployable non-silent ("active") binary classifier:
          label = ndown > 0 over the whole library (see _save_activity_model for the rest).
@@ -508,16 +513,17 @@ class OUTPUT():
         param model: sklearn classifier; None -> RandomForestClassifier(**ACTIVITY_RF)
         param str name: MLTrail experiment_name; None -> config NON_SILENT_MODEL_NAME
         param bool overwrite: reset the latest version instead of appending one
+        param str comment: free-text note stored on this version (None -> field omitted)
         return None: metrics land in self.non_silent_cv, the id in self.non_silent_model_id
         """
         self.non_silent_cv, self.non_silent_model_id = self._save_activity_model(
             data, params, label=(data.MS['ndown'] > 0),
             name=name or getattr(params, 'NON_SILENT_MODEL_NAME', NON_SILENT_NAME),
             task='activity_non_silent_binary', positive='ndown > 0',
-            model=model, folds=folds, overwrite=overwrite)
+            model=model, folds=folds, overwrite=overwrite, comment=comment)
 
     def save_single_low_model(self, data, params, model=None, folds=5, name=None,
-                              overwrite=False):
+                              overwrite=False, comment=None):
         """
         -Train and register the deployable single/low-activity binary classifier:
          label = 1 <= ndown <= 12, i.e. compounds that degrade something but stay selective —
@@ -527,16 +533,17 @@ class OUTPUT():
         param model: sklearn classifier; None -> RandomForestClassifier(**ACTIVITY_RF)
         param str name: MLTrail experiment_name; None -> config SINGLELOW_MODEL_NAME
         param bool overwrite: reset the latest version instead of appending one
+        param str comment: free-text note stored on this version (None -> field omitted)
         return None: metrics land in self.single_low_cv, the id in self.single_low_model_id
         """
         self.single_low_cv, self.single_low_model_id = self._save_activity_model(
             data, params, label=data.MS['ndown'].between(1, 12),
             name=name or getattr(params, 'SINGLELOW_MODEL_NAME', SINGLE_LOW_NAME),
             task='activity_single_low_binary', positive='1 <= ndown <= 12',
-            model=model, folds=folds, overwrite=overwrite)
+            model=model, folds=folds, overwrite=overwrite, comment=comment)
 
     def _save_activity_model(self, data, params, label, name, task, positive, model=None,
-                             folds=5, overwrite=False):
+                             folds=5, overwrite=False, comment=None):
         """
         -Train and register one deployable binary activity classifier: the caller supplies the
          label mask over data.MS, features are MF_features (whatever FEATURES_TYPE is).
@@ -550,6 +557,7 @@ class OUTPUT():
         param series label: boolean mask over data.MS's rows defining the positive class
         param str name: MLTrail experiment_name (the entry the version is appended to)
         param str task/positive: bundle metadata documenting what was learnt
+        param str comment: free-text note; MLTrail drops the field when it is None
         return tuple: (CV metrics dict, MLTrail model id)
         """
         ML_data = data.MS.copy()
@@ -590,7 +598,8 @@ class OUTPUT():
             framework='sklearn', features_type=params.FEATURES_TYPE,
             training_set=train_set, smiles_column='smiles',
             compound_id_column='compound', label_column='label',
-            metrics={'roc_auc': round(cv['roc_auc'], 3), 'pr_auc': round(cv['pr_auc'], 3)})
+            metrics={'roc_auc': round(cv['roc_auc'], 3), 'pr_auc': round(cv['pr_auc'], 3)},
+            comment=comment)
         action = ('overwrote latest version of' if (overwrite and model_id) else
                   'new version of' if model_id else 'registered')
         print(f'> {action} MLTrail model id={new_id} "{name}" '
@@ -694,6 +703,8 @@ if __name__ == "__main__":
                     help="train the single/low (1 <= ndown <= 12) classifier and register it in MLTrail")
     ap.add_argument('--overwrite', action='store_true',
                     help="--save_*: reset the latest version in place instead of appending one")
+    ap.add_argument('--comment', default=None,
+                    help="--save_*: free-text note stored on the MLTrail version being written")
     args = ap.parse_args()
 
     ## params:
@@ -724,7 +735,7 @@ if __name__ == "__main__":
                                n_processes=args.n_processes, n_jobs_per_process=args.n_jobs)
 
     if args.save_non_silent:
-        output.save_non_silent_model(data, params, overwrite=args.overwrite)
+        output.save_non_silent_model(data, params, overwrite=args.overwrite, comment=args.comment)
 
     if args.save_single_low:
-        output.save_single_low_model(data, params, overwrite=args.overwrite)
+        output.save_single_low_model(data, params, overwrite=args.overwrite, comment=args.comment)
