@@ -524,10 +524,20 @@ def load_fbx_tranche(tranche_dir, *, control_compounds=(), contaminants=(),
     _list = lister or (lambda d, pat: _glob.glob(os.path.join(d, pat)))   # (dir, glob) -> paths
     _open = opener or (lambda p: p)                                  # path -> path or file-like (ssh stream)
     pick = lambda kind: _open(_list(tranche_dir, f'*FBX_{kind}*.csv')[0])
+    _cols = ['pg', 'genes', 'uniquecontrast', 'logfc', 'pvalue', 'adjpval', 'significant', 'plate']
     measure = pd.read_csv(pick('MEASURE'),                           # drop the unused 'id' col
-                          usecols=['pg', 'genes', 'uniquecontrast', 'logfc',
-                                   'pvalue', 'adjpval', 'significant', 'plate'])
+                          usecols=lambda c: c in _cols)
     report  = pd.read_csv(pick('REPORT'))
+    # 20260817 onward ships no 'plate'; the uniquecontrast suffix carries it (verified exact, 240/240)
+    for _df in (measure, report):
+        if 'plate' not in _df.columns:
+            _df['plate'] = _df['uniquecontrast'].astype(str).str.split('_complement_').str[-1]
+
+    _need = [c for c in ('nr_down', 'activity') if c not in report.columns]
+    if _need:                                                        # no activity summary -> no MS rows
+        print(f'> {date}: SKIPPED — REPORT has no {_need}; '
+              f'{report["uniquecontrast"].nunique():,} experiments not loaded')
+        return pd.DataFrame(columns=dfraw_cols), pd.DataFrame(columns=ms_cols)
 
     # drop unwanted plates (substring match on the plate name, case-insensitive)
     _pat = '|'.join(drop_plate_substr)
@@ -3813,3 +3823,465 @@ def convert2sdf(src, suffix='.sdf'):
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(data)
         return tmp.name
+
+
+# protein names a curated target sheet uses instead of an HGNC symbol (match_gene_symbols)
+GENE_ALIASES = {'tau': 'MAPT', 'c-myc': 'MYC', 'α-synuclein': 'SNCA', 'a-synuclein': 'SNCA',
+                'magl': 'MGLL', 'sting': 'STING1', 'cgas': 'CGAS', 'menin': 'MEN1', 'er': 'ESR1',
+                'shp2': 'PTPN11', 'asct2': 'SLC1A5', 'apoe4': 'APOE', 'helios': 'IKZF2',
+                'brm': 'SMARCA2', 'β-catenin': 'CTNNB1', 'bloom helicase': 'BLM'}
+
+
+def match_gene_symbols(names, known_genes, aliases=None):
+    """Map free-text target names onto the HGNC symbols a screen actually measured.
+
+    Handles the shapes a curated target sheet uses: an alias in parentheses ('EPAS1 (HIF-2a)'),
+    several genes in one cell ('IKZF1 / IKZF3'), a qualifier ('BTK (next-gen)') and a protein
+    name in place of a symbol ('c-Myc' -> MYC, through `aliases`). The first candidate found in
+    `known_genes` wins, so an unmatched row means the gene was never measured.
+
+    :param iterable names: raw target names, one per row
+    :param iterable known_genes: symbols to match against (e.g. gene_metrics['gene'])
+    :param dict aliases: extra name -> symbol pairs, case-insensitive; defaults to GENE_ALIASES
+    :return df: target, symbol (None when nothing matched), matched (bool)
+    """
+    import re
+    known = {str(g).upper(): str(g) for g in known_genes}
+    aliases = {k.lower(): v for k, v in (GENE_ALIASES if aliases is None else aliases).items()}
+    rows = []
+    for name in names:
+        target = str(name).strip()
+        # '(alias)' becomes another '/'-separated part, so both halves are candidates
+        parts = [target] + re.split(r'[/,]', re.sub(r'\(([^)]*)\)', r'/\1', target))
+        cands = [p.strip() for p in parts if p.strip()]
+        cands += [aliases[c.lower()] for c in cands if c.lower() in aliases]
+        hit = next((known[c.upper()] for c in cands if c.upper() in known), None)
+        rows.append({'target': target, 'symbol': hit, 'matched': hit is not None})
+    return pd.DataFrame(rows)
+
+
+def count_hits_by_activity(df_raw, MS, genes=None,
+                           cats=('Single (1)', 'Low (2-10)', 'Medium (11-25)', 'High (>25)'),
+                           sig_col='significant', logfc_col='logfc'):
+    """Count, per gene, how many compounds of each activity class significantly down-regulate it.
+
+    A hit is one (gene, compound) pair with ``sig_col == 1`` and ``logfc < 0`` — the same rule
+    that ``ndown`` counts (verified: identical for 96.7% of compounds, Pearson 0.994). Repeated
+    contrasts of one compound collapse, so each column is a **compound** count. The activity
+    class comes from ``MS``, so it describes the compound, not the gene: a gene hit only by
+    'High (>25)' compounds responds to promiscuous degraders, and one hit by 'Single (1)'
+    compounds has selective chemistry.
+
+    :param df df_raw: per-gene table (genes | compound | logfc | significant)
+    :param df MS: per-compound summary (compound | activity)
+    :param iterable genes: restrict to these gene symbols; None keeps every gene
+    :param tuple cats: activity classes to return as columns, in order
+    :return df: genes, one column per class, and `hits` (all classes, so Silent counts too)
+    """
+    sub = df_raw if genes is None else df_raw[df_raw['genes'].isin(set(genes))]
+    hits = sub[(sub[sig_col] == 1) & (sub[logfc_col] < 0)][['genes', 'compound']].drop_duplicates()
+    hits = hits.merge(MS[['compound', 'activity']], on='compound')
+    out = pd.crosstab(hits['genes'], hits['activity'])
+    total = out.sum(axis=1)
+    out = out.reindex(columns=list(cats), fill_value=0)
+    out['hits'] = total
+    if genes is not None:   # a gene nothing hits still gets a row, of zeros
+        out = out.reindex(index=list(dict.fromkeys(genes)), fill_value=0)
+        out.index.name = 'genes'
+    return out.reset_index()
+
+
+def gene_ms_score(df_raw, genes=None, significant_only=True):
+    """Per-gene MS score: the strongest degradation signal the screen ever recorded for that gene.
+
+    Port of the canonical formula in ``../Px_interface/python/Px_interface.py`` (lines 127-131),
+    aggregated the way the 3D gene dots use it — per-gene max over ``significant == 1`` rows
+    (Px_interface.py:386)::
+
+        ms_score = (-logfc) * (-log10 pvalue), clipped to [0, 100]
+
+    A degrader has ``logfc < 0``, so the product is positive: score = depth of degradation x
+    confidence. A stabilised protein (``logfc > 0``) scores 0 by design. ``pvalue == 0`` gives
+    inf, which clips to exactly 100. The expression below is the algebraically identical
+    one-liner ``logfc * log10(pvalue)``. Note it uses the raw ``pvalue``, not ``adjpval``.
+
+    ⚠ ``dropna()`` runs over **all** columns, as the canonical does, so a NaN in `pg` or
+    `adjpval` removes that row from the score. Pass the whole ``df_raw``: a column subset scores
+    more rows and the per-gene max then differs (measured: 6 extra genes, up to 62.5 apart).
+
+    :param df df_raw: the full per-gene table (genes | logfc | pvalue | significant | ...)
+    :param iterable genes: restrict to these gene symbols; None keeps every gene
+    :param bool significant_only: keep only significant rows, as the interface does
+    :return series: ms_score per gene, named 'ms_score'; a gene with no qualifying row is absent
+    """
+    sub = df_raw if genes is None else df_raw[df_raw['genes'].isin(set(genes))]
+    sub = sub.dropna()   # canonical: spans EVERY column, so pass the full df_raw (see docstring)
+    if significant_only:
+        sub = sub[sub['significant'] == 1]
+    score = (sub['logfc'] * np.log10(sub['pvalue'])).clip(lower=0.0, upper=100.0)
+    return score.groupby(sub['genes']).max().rename('ms_score')
+
+
+def rank_gene_standout(df_raw, gene, only_nonsignificant=True, require_down=True, max_layer=2,
+                       radius=0.25, scale_pct=99, p_floor=1e-300,
+                       gene_col='genes', exp_col='uniquecontrast'):
+    """Rank the volcanoes in which one gene sits apart from every other gene.
+
+    Built for the "under-appreciated compound" search: a compound that moves `gene` almost
+    alone is worth expanding the library around, even when the significance flag missed it.
+    One row per experiment (``exp_col``), because a Pareto frontier only means something
+    inside a single volcano.
+
+    Per volcano, on ``x = logfc`` and ``y = -log10(pvalue)``:
+
+    - **scale** each axis by that volcano's own ``scale_pct`` percentile, so a crowded plate
+      and a quiet plate compare on equal terms;
+    - **dominate**: a gene beats `gene` when it is both more negative in logfc and higher in y.
+      ``n_dom`` counts those; ``layer`` is 1 + the longest chain of them (1 = on the frontier);
+    - **isolate**: ``d_any`` is the scaled distance to the nearest other gene — this is the
+      ranking column, and it is what demotes a co-moving regulon; ``d_bulk`` is the distance to
+      the nearest gene that is NOT on the frontier, i.e. the height above the cloud; ``density``
+      counts the genes inside ``radius``.
+
+    :param df df_raw: per-gene table (genes | uniquecontrast | logfc | pvalue | significant)
+    :param str gene: the gene to score, e.g. 'PCSK9'
+    ``pvalue == 0`` is underflow, not certainty: it is floored at the smallest positive p seen
+    in that same volcano, so one underflowing row cannot inflate the y scale.
+
+    :param bool only_nonsignificant: keep only volcanoes where `gene` has significant == 0
+    :param bool require_down: keep only volcanoes where `gene` itself has logfc < 0
+    :param int max_layer: drop volcanoes where `gene` sits deeper than this Pareto layer
+    :param float radius: neighbour-count radius, in units of the volcano's own spread
+    :return df: one row per experiment, sorted by d_any descending
+    """
+    import bisect
+    cols = [gene_col, exp_col, 'logfc', 'pvalue', 'significant']
+    d = df_raw[cols].dropna(subset=[gene_col, exp_col, 'logfc', 'pvalue'])
+    keep = d.loc[d[gene_col] == gene]
+    if only_nonsignificant:
+        keep = keep[keep['significant'] == 0]
+    if require_down:
+        keep = keep[keep['logfc'] < 0]
+    d = d[d[exp_col].isin(set(keep[exp_col]))]
+
+    rows = []
+    for exp, v in d.groupby(exp_col, sort=False):
+        x, pv = v['logfc'].to_numpy(), v['pvalue'].to_numpy()
+        _pos = pv[pv > 0]
+        y = -np.log10(np.clip(pv, max(_pos.min(), p_floor) if len(_pos) else p_floor, None))
+        i = np.flatnonzero(v[gene_col].to_numpy() == gene)
+        if len(i) != 1:
+            continue                     # gene absent or duplicated in this volcano
+        gx, gy = x[i[0]], y[i[0]]
+        sx = np.percentile(np.abs(x), scale_pct) or 1.0
+        sy = np.percentile(y, scale_pct) or 1.0
+
+        dom = (x < gx) & (y > gy)        # both more negative AND more significant
+        # layer = 1 + longest chain of dominators (x increasing, y decreasing) -> patience sort
+        tails = []
+        for _y in y[dom][np.argsort(x[dom], kind='stable')]:
+            j = bisect.bisect_left(tails, -_y)
+            tails[j:j + 1] = [-_y]
+        layer = len(tails) + 1
+
+        eff = pareto_front(x, y)         # the frontier is only defined in the down quadrant
+
+        dist = np.hypot((x - gx) / sx, (y - gy) / sy)
+        dist[i[0]] = np.inf             # never measure the gene against itself
+        rows.append({exp_col: exp, 'logfc': gx, 'pvalue': pv[i[0]], 'y': gy,
+                     'n_dom': int(dom.sum()), 'layer': layer, 'on_frontier': bool(eff[i[0]]),
+                     'd_any': float(dist.min()),
+                     'd_bulk': float(dist[~eff].min()) if (~eff).any() else np.nan,
+                     'density': int((dist <= radius).sum()),
+                     'n_genes': len(x), 'n_frontier': int(eff.sum()),
+                     'y_max': float(y.max()), 'scale_x': float(sx), 'scale_y': float(sy)})
+
+    out = pd.DataFrame(rows, columns=[exp_col, 'logfc', 'pvalue', 'y', 'n_dom', 'layer',
+                                      'on_frontier', 'd_any', 'd_bulk', 'density', 'n_genes',
+                                      'n_frontier', 'y_max', 'scale_x', 'scale_y'])   # keep the
+    # schema when no volcano qualifies, so a multi-target loop can skip the gene instead of crashing
+    return out[out['layer'] <= max_layer].sort_values('d_any', ascending=False).reset_index(drop=True)
+
+
+def pareto_front(x, y, down_only=True):
+    """Mask the Pareto-efficient points of a volcano: nothing is both lower in x and higher in y.
+
+    On a volcano ``x = logfc`` and ``y = -log10 pvalue``, so an efficient point is one no gene
+    beats on depth of down-regulation AND on confidence at the same time. Shared by
+    :func:`rank_gene_standout` and :func:`plot_volcano_pareto`.
+
+    :param array x, y: coordinates, same length
+    :param bool down_only: restrict the frontier to x < 0, where degradation lives
+    :return array: boolean mask of the efficient points
+    """
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    eff = np.zeros(len(x), bool)
+    keep = np.flatnonzero(x < 0) if down_only else np.arange(len(x))
+    if not len(keep):
+        return eff
+    o = keep[np.argsort(x[keep], kind='stable')]
+    xs, ys = x[o], y[o]
+    # group equal x, so a tie on EITHER axis never counts as domination (p == 0 floors tie y a lot)
+    starts = np.flatnonzero(np.r_[True, xs[1:] != xs[:-1]])
+    prev = np.r_[-np.inf, np.maximum.accumulate(np.maximum.reduceat(ys, starts))[:-1]]
+    eff[o] = ys >= prev[np.cumsum(np.r_[True, xs[1:] != xs[:-1]]) - 1]
+    return eff
+
+
+def pareto_layers(x, y, max_layer=1, down_only=True):
+    """Peel Pareto frontiers: layer 1 is the frontier, layer 2 the frontier of what remains, ...
+
+    :param array x, y: coordinates, same length
+    :param int max_layer: how many layers to peel
+    :param bool down_only: only x < 0 can belong to a layer
+    :return array: int layer per point, 1..max_layer, and 0 for everything deeper or excluded
+    """
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    out, left = np.zeros(len(x), int), np.ones(len(x), bool)
+    for k in range(1, max_layer + 1):
+        idx = np.flatnonzero(left)
+        if not len(idx):
+            break
+        eff = pareto_front(x[idx], y[idx], down_only=down_only)
+        out[idx[eff]] = k
+        left[idx[eff]] = False
+    return out
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# STRING-db — first-shell interactors of ONE gene symbol
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+_STRING_URL = 'https://string-db.org/api/tsv/interaction_partners'
+
+
+def string_first_shell(gene, species=9606, min_score=700, limit=50, cache_dir=None, timeout=20):
+    """Return the STRING first-shell interactors of ONE gene symbol.
+
+    PRIVACY: the request carries the gene symbol and nothing else. No compound id, no
+    measurement and no screen-derived gene LIST leaves the machine — the volcano match
+    runs locally, on the frame this returns. A list argument is refused for that reason.
+
+    A STRING score mixes evidence channels, so a high `score` does NOT mean "binds inside
+    the cell". Read the channels: `escore` (experiments) and `dscore` (curated databases)
+    carry physical evidence; `tscore` (text mining) and `ascore` (co-expression) do not.
+
+    :param str gene: one HGNC symbol, e.g. 'SMARCA2'
+    :param int species: NCBI taxon id (9606 = human)
+    :param int min_score: combined-score cut; STRING calls 700 "high confidence"
+    :param int limit: cap on the shell, highest score first
+    :param str cache_dir: write <gene>_<species>_<score>_<limit>.tsv here and re-use it
+    :return df: partner | score | escore | dscore | tscore | ascore, sorted by score
+    """
+    if not isinstance(gene, str):
+        raise TypeError('string_first_shell takes ONE symbol — a list would send screen data')
+    cache = os.path.join(cache_dir, f'{gene}_{species}_{min_score}_{limit}.tsv') if cache_dir else None
+    if cache and os.path.exists(cache):
+        raw = pd.read_csv(cache, sep='\t')
+        print(f'> STRING {gene}: {len(raw)} partners from cache ({cache})')
+    else:
+        import io, requests
+        r = requests.get(_STRING_URL, timeout=timeout,
+                         params={'identifiers': gene, 'species': species, 'caller_identity': 'MS_ML',
+                                 'required_score': min_score, 'limit': limit})
+        r.raise_for_status()
+        raw = pd.read_csv(io.StringIO(r.text), sep='\t')
+        if cache:
+            os.makedirs(cache_dir, exist_ok=True)
+            raw.to_csv(cache, sep='\t', index=False)
+        print(f'> STRING {gene}: {len(raw)} partners at score >= {min_score}'
+              + (f' — cached to {cache}' if cache else ''))
+    return (raw.rename(columns={'preferredName_B': 'partner'})
+               [['partner', 'score', 'escore', 'dscore', 'tscore', 'ascore']]
+               .sort_values('score', ascending=False).reset_index(drop=True))
+
+
+def plot_volcano_pareto(df_raw, uniquecontrast, highlight=None, max_layer=1, max_labels=15, p_floor=1e-300,
+                        thresh_logfc=1.0, thresh_p=0.05, up_color='#008bfb', down_color='#ff0051',
+                        front_color='#2b2b2b', hi_color='#0EA5CE', partners=None,
+                        partner_color='#E8B04B', compound=None, struct_dir=None,
+                        struct_size=0.45, height=650, width=1000):
+    """Interactive volcano for ONE experiment, with the Pareto frontier coloured and labelled.
+
+    Three layers, so fill and outline carry different facts:
+
+    - **fill** = significance and direction — grey for the bulk, `down_color` for a significant
+      gene with ``logfc < 0``, `up_color` for one with ``logfc >= 0``;
+    - **dark outer ring + label** = the Pareto layers of the down quadrant
+      (:func:`pareto_layers`), layer 1 being the genes no other gene beats on depth AND
+      confidence; deeper layers fade, so `max_layer` should match the standout gate;
+    - **`hi_color` ring** = `highlight`, efficient or not, so a candidate is checked by eye;
+    - **`partner_color` ring** = `partners`, e.g. the STRING first shell of `highlight`
+      (:func:`string_first_shell`) — a selective event moves the ringed gene and leaves its
+      partners in the grey cloud.
+
+    A frontier gene therefore keeps its own fill and gains a ring; the two facts never collide.
+    Hover carries gene, logfc, pvalue and the significance flag.
+
+    The dashed lines are **display guides only** (`|logfc| >= thresh_logfc`, `p <= thresh_p`).
+    They are NOT the `significant` column, which uses a stricter per-experiment cut — pass
+    ``thresh_logfc=None`` to drop them.
+
+    :param df df_raw: per-gene table (genes | uniquecontrast | logfc | pvalue | significant)
+    :param str uniquecontrast: the experiment to draw
+    :param str highlight: gene to ring and label in `hi_color`
+    :param list partners: genes to ring and label in `partner_color`, the ones measured here
+    :param str up_color, down_color: fill for significant up / down genes (config ACTIVE_C / SILENT_C)
+    :param str compound: SRB id whose structure PNG goes in the top-right corner
+    :param str struct_dir: directory of ``<compound>.png`` files (config SRB_PNG_DIR)
+    :param float struct_size: structure size, as a fraction of the figure
+    :param int max_layer: how many Pareto layers to ring (1 = the frontier only)
+    :param str front_color: outline of the Pareto ring, faded for the deeper layers
+    :param int max_labels: label at most this many frontier genes, the highest y first
+    :return figure: a plotly Figure — call .show() in the notebook
+    """
+    import plotly.graph_objects as go
+    v = df_raw[df_raw['uniquecontrast'] == uniquecontrast].dropna(subset=['genes', 'logfc', 'pvalue'])
+    if v.empty:
+        raise ValueError(f'no rows for uniquecontrast {uniquecontrast!r}')
+    pv = v['pvalue'].to_numpy()
+    _pos = pv[pv > 0]
+    v = v.assign(y=-np.log10(np.clip(pv, max(_pos.min(), p_floor) if len(_pos) else p_floor, None)),
+                 layer=pareto_layers(v['logfc'].to_numpy(), -np.log10(np.clip(
+                     pv, max(_pos.min(), p_floor) if len(_pos) else p_floor, None)), max_layer))
+    _part = set(partners or ())
+    hover = ('<b>%{customdata[0]}</b><br>logfc %{x:.3f}<br>p %{customdata[1]:.2e}'
+             '<br>significant %{customdata[2]:.0f}<extra></extra>')
+    cd = lambda d: d[['genes', 'pvalue', 'significant']].to_numpy()
+
+    sig = v['significant'] == 1
+    fig = go.Figure()
+    bulk = v[~sig]
+    fig.add_scatter(x=bulk['logfc'], y=bulk['y'], mode='markers', name='not significant',
+                    marker=dict(size=4, color='#c9c9c9'), customdata=cd(bulk), hovertemplate=hover)
+    for label, hits, colr in [('down', v[sig & (v['logfc'] < 0)], down_color),
+                              ('up', v[sig & (v['logfc'] >= 0)], up_color)]:
+        if len(hits):
+            fig.add_scatter(x=hits['logfc'], y=hits['y'], mode='markers',
+                            name=f'significant {label} ({len(hits)})',
+                            marker=dict(size=7, color=colr), customdata=cd(hits), hovertemplate=hover)
+    for k in range(1, max_layer + 1):
+        lay = v[v['layer'] == k].sort_values('y', ascending=False)
+        if not len(lay):
+            continue
+        fade = 1.0 if k == 1 else max(0.25, 0.75 ** k)   # deeper layers read as secondary
+        fig.add_scatter(x=lay['logfc'], y=lay['y'], mode='markers+text',
+                        name=f'Pareto layer {k} ({len(lay)})',
+                        marker=dict(size=13, color='rgba(0,0,0,0)',
+                                    line=dict(width=2.2 - 0.5 * k, color=front_color)),
+                        opacity=fade,
+                        text=['' if g == highlight or g in _part else g if i < max_labels else ''
+                              for i, g in enumerate(lay['genes'])],   # those two label themselves
+                        textposition='middle right', textfont=dict(size=10, color=front_color),
+                        customdata=cd(lay), hovertemplate=hover)
+    if len(_part & set(v['genes'])):
+        pt = v[v['genes'].isin(_part - {highlight})].sort_values('y', ascending=False)
+        fig.add_scatter(x=pt['logfc'], y=pt['y'], mode='markers+text',
+                        name=f'{highlight or "STRING"} partners ({len(pt)}/{len(_part)} measured)',
+                        marker=dict(size=16, color='rgba(0,0,0,0)',
+                                    line=dict(width=1.8, color=partner_color)),
+                        text=[g if i < max_labels else '' for i, g in enumerate(pt['genes'])],
+                        textposition='bottom center', textfont=dict(size=10, color=partner_color),
+                        customdata=cd(pt), hovertemplate=hover)
+    if highlight is not None and (v['genes'] == highlight).any():
+        h = v[v['genes'] == highlight]
+        fig.add_scatter(x=h['logfc'], y=h['y'], mode='markers+text', name=highlight,
+                        marker=dict(size=20, color='rgba(0,0,0,0)',
+                                    line=dict(width=2.5, color=hi_color)),
+                        text=[highlight], textposition='top center',
+                        textfont=dict(size=12, color=hi_color),
+                        customdata=cd(h), hovertemplate=hover)
+    for xl in ([-thresh_logfc, thresh_logfc] if thresh_logfc else []):
+        fig.add_vline(x=xl, line=dict(dash='dash', width=1, color='#999'))
+    if thresh_p:
+        fig.add_hline(y=-np.log10(thresh_p), line=dict(dash='dash', width=1, color='#999'))
+    if compound and struct_dir:
+        _png = os.path.join(struct_dir, f'{compound}.png')
+        if os.path.exists(_png):
+            import base64
+            with open(_png, 'rb') as _fh:
+                _uri = 'data:image/png;base64,' + base64.b64encode(_fh.read()).decode()
+            fig.add_layout_image(source=_uri, xref='paper', yref='paper', x=1, y=1,
+                                 sizex=struct_size, sizey=struct_size, xanchor='right',
+                                 yanchor='top', sizing='contain', layer='above')
+        else:
+            print(f'> no structure png for {compound} in {struct_dir}')
+    fig.update_layout(template='simple_white', height=height, width=width,
+                      title=f'{uniquecontrast} — {int((v["layer"] == 1).sum())} genes on the frontier',
+                      xaxis_title='logfc', yaxis_title='-log10(p-value)',
+                      legend=dict(orientation='v', x=1.02, xanchor='left', y=1, yanchor='top'))   # outside: never on a point
+    return fig
+
+
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Gene-standout reports — one enriched table and one HTML report per target
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+STANDOUT_COLS = ['compound', 'plate', 'logfc', 'pvalue', 'layer', 'd_any', 'd_bulk', 'density',
+                 'n_frontier', 'ndown', 'activity', 'partners_down', 'partners_logfc']
+
+
+def standout_table(df_raw, MS, gene, cm2rm=(), partners=(), max_layer=2, radius=0.25, scale_pct=99):
+    """Run :func:`rank_gene_standout` for one gene, then attach compound, plate and activity.
+
+    The single-target cell and the multi-target loop share this, so both read the same columns.
+    An empty frame comes back when no volcano qualifies — the caller skips that gene.
+
+    :param df df_raw: per-gene table (genes | uniquecontrast | logfc | pvalue | significant)
+    :param df MS: per-compound table (compound | ndown | activity)
+    :param str gene: the target symbol
+    :param iterable cm2rm: compounds dropped from every analysis (contaminants / controls / ...)
+    :param iterable partners: co-regulated genes to control for; empty leaves the columns NaN
+    :return df: one row per experiment, sorted by d_any descending
+    """
+    s = rank_gene_standout(df_raw, gene, max_layer=max_layer, radius=radius, scale_pct=scale_pct)
+    meta = df_raw.drop_duplicates('uniquecontrast').set_index('uniquecontrast')
+    s['compound'] = s['uniquecontrast'].map(meta['compound'])
+    s['plate'] = s['uniquecontrast'].map(meta['MSPlate'])
+    s = (s[~s['compound'].isin(set(cm2rm))]
+         .merge(MS[['compound', 'ndown', 'activity']], on='compound', how='left'))
+    s[['partners_down', 'partners_logfc']] = np.nan
+    if len(list(partners)) and len(s):
+        p = df_raw[df_raw['genes'].isin(partners) & df_raw['uniquecontrast'].isin(s['uniquecontrast'])]
+        p = p.assign(_down=(p['significant'] == 1) & (p['logfc'] < 0))
+        s[['partners_down', 'partners_logfc']] = (
+            p.groupby('uniquecontrast').agg(partners_down=('_down', 'sum'),
+                                            partners_logfc=('logfc', 'mean'))
+             .reindex(s['uniquecontrast']).to_numpy())
+    return s.reset_index(drop=True)
+
+
+def standout_report_html(df_raw, gene, sel, max_layer=2, cols=None, up_color='#008bfb',
+                         down_color='#ff0051', partners=None, struct_dir=None, struct_size=0.45,
+                         max_volcanoes=0, note=''):
+    """Build a one-target HTML report: the standout table, then one volcano per row.
+
+    plotly.js loads from the CDN once, on the first figure, so the file stays small enough to
+    open straight from Dropbox. `max_volcanoes` caps the heaviest targets (0 = no cap).
+
+    :param df sel: the rows to report, already filtered and ordered (see :func:`standout_table`)
+    :param int max_volcanoes: draw at most this many figures, the table still lists every row
+    :param str note: one extra sentence under the heading, e.g. the partner set used
+    :return str: the complete HTML document
+    """
+    cols = [c for c in (cols or STANDOUT_COLS) if c in sel.columns]
+    draw = sel if not max_volcanoes else sel.head(max_volcanoes)
+    blocks = [f'<h1>{gene} — under-appreciated compounds</h1>',
+              f'<p>{len(sel)} volcanoes where {gene} is <b>not</b> significant yet sits within '
+              f'Pareto layer {max_layer}, ranked by isolation (d_any). {pd.Timestamp.today():%Y-%m-%d}.'
+              + (f' {note}' if note else '')
+              + (f' Figures shown for the first {len(draw)}.' if len(draw) < len(sel) else '') + '</p>',
+              sel[cols].to_html(index=False, float_format='%.3g')]
+    for i, row in draw.reset_index(drop=True).iterrows():
+        fig = plot_volcano_pareto(df_raw, row['uniquecontrast'], highlight=gene, max_layer=max_layer,
+                                  up_color=up_color, down_color=down_color, partners=partners,
+                                  compound=row['compound'], struct_dir=struct_dir,
+                                  struct_size=struct_size)
+        blocks.append(f"<h2>#{i + 1} — {row['compound']} — {row['plate']} — {row['activity']} "
+                      f"(ndown {row['ndown']:.0f}) — d_any {row['d_any']:.3f}</h2>")
+        blocks.append(fig.to_html(full_html=False, include_plotlyjs='cdn' if i == 0 else False))
+    return ('<!doctype html><meta charset="utf-8">'
+            f'<title>{gene} standout report</title>'
+            '<body style="font-family:system-ui;max-width:1100px;margin:24px auto">'
+            + '\n'.join(blocks) + '</body>')

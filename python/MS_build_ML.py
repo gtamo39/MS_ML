@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from glob import glob
 from datetime import date
+import openpyxl   # MUST precede rdkit.Chem.Draw (via Rdkit_tools): the reverse order segfaults pd.read_excel
 from rdkit import Chem
 import yaml
 from joblib import parallel_config
@@ -230,7 +231,8 @@ class DATA():
             self.serac_df = (get_df(vault=7108, collections=['AK', 'AJ'],
                                     columns=['name', 'Batch Mol-Batch ID', 'smiles', 'Px_repetition(yes/no)',
                                              'Px_validated_WT(yes/no)', 'Px_Ligase_dependent(yes/no)',
-                                             'Px_NameLigase_dependent', 'Px_Target_info', 'Px_Target_interest'])
+                                             'Px_NameLigase_dependent', 'Px_Target_info', 'Px_Target_interest',
+                                             'Largest_Vector', 'Largest_Vector_Lenght'])
                              .rename(columns={'name': 'compound'}))
             self.serac_df.to_csv(params.CHEMLIB_PATH, sep=',', index=False)
         else:
@@ -277,9 +279,10 @@ class DATA():
          from the three CDD/Database tranches plus every FBX tranche under FBX_DIR, collapse to the
          latest batch/date per compound, drop controls+contaminants and non-library compounds, then
          cache both to DFRAW_PATH / MS_PATH. Otherwise read the cached parquets.
-        -Either way, config EXCLUDE_DATES tranches are then dropped from df_raw (see
-         drop_excluded_dates) — in memory, never from the cache.
-        param class params: PARAMS instance (DFRAW_OVERWRITE, RAW_/CLEAN_PROTEOMICS_PATH, PX_*, FBX_DIR, MS_PATH, DFRAW_PATH, EXCLUDE_DATES)
+        -Either way, config EXCLUDE_DATES tranches and then the cm2rm compounds are dropped from
+         df_raw AND MS (see drop_excluded_dates / drop_cm2rm) — in memory, never from the cache.
+         So build cm2rm first: call get_contaminants_and_controls before this.
+        param class params: PARAMS instance (DFRAW_OVERWRITE, RAW_/CLEAN_PROTEOMICS_PATH, PX_*, FBX_DIR, MS_PATH, DFRAW_PATH, EXCLUDE_DATES, DROP_CM2RM)
         return None:
         """
         if not params.DFRAW_OVERWRITE:
@@ -287,6 +290,7 @@ class DATA():
             self.df_raw = pd.read_parquet(params.DFRAW_PATH)
             print(f'> loaded cached MS {self.MS.shape} | df_raw {self.df_raw.shape}')
             self.drop_excluded_dates(params)
+            self.drop_cm2rm(params)
             return
 
         # -------------------
@@ -391,6 +395,7 @@ class DATA():
         self.df_raw.to_parquet(params.DFRAW_PATH, index=False)
         print(f'> rebuilt MS {self.MS.shape} -> {params.MS_PATH} | df_raw {self.df_raw.shape} -> {params.DFRAW_PATH}')
         self.drop_excluded_dates(params)
+        self.drop_cm2rm(params)
 
     def drop_excluded_dates(self, params):
         """
@@ -409,6 +414,26 @@ class DATA():
         drop_ms  = pd.to_datetime(self.MS['date']).isin(dates)
         print(f'> EXCLUDE_DATES {[d.strftime("%Y-%m-%d") for d in dates]}: dropped {drop_raw.sum():,} df_raw rows '
               f'/ {drop_ms.sum():,} MS compounds')
+        self.df_raw, self.MS = self.df_raw[~drop_raw], self.MS[~drop_ms]
+
+    def drop_cm2rm(self, params):
+        """
+        -Drop the cm2rm compounds (config CM2RM_PARTS) from BOTH df_raw and MS, so every downstream
+         step — activity models, hot-target counts, gene screen, standout search — sees the same
+         cohort without re-applying the rule. In memory only, like drop_excluded_dates: the
+         parquets keep every compound. Set config DROP_CM2RM: false to keep them in the frames.
+        param class params: PARAMS instance (DROP_CM2RM)
+        return None:
+        """
+        if not getattr(params, 'DROP_CM2RM', True):
+            return
+        if self.cm2rm is None:   # the load ran before get_contaminants_and_controls
+            print('> DROP_CM2RM: cm2rm not built yet — nothing dropped (call get_contaminants_and_controls first)')
+            return
+        bad = set(self.cm2rm)
+        drop_raw, drop_ms = self.df_raw['compound'].isin(bad), self.MS['compound'].isin(bad)
+        print(f'> DROP_CM2RM: dropped {self.df_raw.loc[drop_raw, "compound"].nunique():,} compounds '
+              f'({drop_raw.sum():,} df_raw rows) / {drop_ms.sum():,} MS compounds')
         self.df_raw, self.MS = self.df_raw[~drop_raw], self.MS[~drop_ms]
 
     def load_opentargets(self, params):

@@ -109,6 +109,7 @@ affect the screen and the classifiers alike; the last two only name the registry
 |---|---|
 | `EXCLUDE_DATES` | screen dates dropped from `df_raw` **and** `MS` (`DATA.drop_excluded_dates`) — in memory, the parquets keep them, so emptying the key restores them without a rebuild. The gene screen and the classifiers share one cohort |
 | `CM2RM_PARTS` | which blacklists build `cm2rm`: any subset of `contaminants` / `control_compounds` / `fbx_independent`. `--cm2rm a,b` overrides it |
+| `DROP_CM2RM` | `true` drops the `cm2rm` compounds from `df_raw` **and** `MS` at load (`DATA.drop_cm2rm`, after `drop_excluded_dates`) — in memory, the parquets keep them. Every downstream step inherits it, including `--save_non_silent` / `--save_single_low`. `false` keeps them in the frames |
 | `NON_SILENT_MODEL_NAME` | MLTrail `experiment_name` for the `ndown > 0` classifier (`--save_non_silent`) |
 | `SINGLELOW_MODEL_NAME` | MLTrail `experiment_name` for the `1 <= ndown <= 12` classifier (`--save_single_low`) |
 

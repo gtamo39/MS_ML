@@ -71,6 +71,7 @@ BMS_GENES: data/patent/BMS_Pipeline_genes.csv
 OT_CACHE: output/MS/opentargets_target_disease.parquet
 MCS_CSV: output/MS/20260505_target_final_mcs.csv
 ML_MODEL_OUTPUT: output/ML/trained_models/20260617_select_genes # date should match that of last MS tranche
+HOT_TARGETS: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/1_Biology/Target first approach/Hot target review/High_value_targets_for_MGD_screening_reformated.xlsx
 
 # chemistry feature set: prevalence (H236 with Morgan bits >2% kept) | H236 (full universe)
 # | H237 (H236 + descriptastorus RDKit2D 'DS_*' descriptors; needs the descriptastorus pip pkg)
@@ -78,6 +79,7 @@ ML_MODEL_OUTPUT: output/ML/trained_models/20260617_select_genes # date should ma
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
 CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
+SRB_PNG_DIR: data/srb_png            # one <compound>.png structure per SRB id (fn.plot_volcano_pareto)
 DFRAW_PATH: output/MS/df_raw.parquet
 MS_PATH: output/MS/MS.parquet
 
@@ -102,6 +104,8 @@ CONTROLS:
 # control_compounds (CONTROLS above) | contaminants (the CONTAMINANTS csv). A `parts=` argument
 # to DATA.get_contaminants_and_controls, or --cm2rm on the CLI, overrides this.
 CM2RM_PARTS: [contaminants, fbx_independent]
+DROP_CM2RM: true              # drop cm2rm from df_raw AND MS at load (in memory; parquets keep them),
+                              # so every downstream step inherits it — false keeps them in the frames
 
 # disease association research:
 FUNC_ENRICH_PATH: output/cell_signature/compound_function_enrichment.parquet
@@ -116,7 +120,25 @@ STOCK_ID_COL: Batch Molecule Batch ID   # batch id (SRB-XXXXXXX-NNN); compound =
 GENE_SAR_OUT: output/MS/20260812_geneSAR_R2_full_genome.csv   # per-gene screen results (resumable: delete to redo)
 EXCLUDE_DATES: ['2026-08-13']   # tranches dropped from df_raw AND MS at load (in memory; parquets keep them)
 
-CHEMLIB_OVERWRITE: false
+# gene-standout search (fn.rank_gene_standout): volcanoes where one gene sits apart from the rest
+STANDOUT_MAX_LAYER: 2       # allowed Pareto depth (1 = strictly on the down frontier)
+STANDOUT_RADIUS: 0.25       # neighbour-count radius, in units of the volcano's own spread
+STANDOUT_SCALE_PCT: 99      # per-volcano scaling percentile for each axis
+
+# STRING-db first shell (fn.string_first_shell, ringed on the volcano by plot_volcano_pareto).
+# ONLY the gene symbol leaves the machine — the match against the volcano runs locally.
+STRING_SPECIES: 9606        # NCBI taxon id (9606 = human)
+STRING_MIN_SCORE: 700       # combined-score cut; STRING calls 700 'high confidence'
+STRING_MAX_PARTNERS: 50     # cap on the shell, highest score first
+STRING_CACHE: data/external/string   # <gene>_<species>_<score>_<limit>.tsv; delete to refetch
+
+# multi-target standout reports (Hot_Targets section 2): one HTML per hot target, pushed to Dropbox.
+# A volcano costs ~0.35 MB in the file, so the cap controls both the size and the build time.
+STANDOUT_REPORT_DBX: predictions/standout_reports/   # appended to DROPBOX_ML
+STANDOUT_REPORT_LOC: output/MS/standout_reports      # local copy before the push
+STANDOUT_REPORT_MAX: 10     # volcanoes DRAWN per report, top d_any first (0 = all); the table lists every row
+
+CHEMLIB_OVERWRITE: true
 DFRAW_OVERWRITE: false
 
 # Saved MLTrail models:
