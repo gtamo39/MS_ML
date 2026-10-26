@@ -7,6 +7,7 @@ Currently contains:
 """
 
 import os
+import functools
 import numpy as np
 import pandas as pd
 
@@ -332,7 +333,9 @@ def load_proteomics_data(
     :return: ``(df_raw, MS)`` — filtered raw table and the metadata table.
     """
     # --- Raw table (common to all tranches) ---
-    df_raw = pd.read_csv(raw_proteomics_path)
+    # round_trip: the exports store p as a plain decimal, and the default parser cuts it after
+    # ~17 digits, so every p < ~1e-17 reads as 0 (Px_interface fix of 2026-10-21).
+    df_raw = pd.read_csv(raw_proteomics_path, float_precision='round_trip')
     if mode == 'cddvault':
         # Database export names this column 'unique'; match the earlier tranche.
         df_raw = df_raw.rename(columns={'unique': 'uniquecontrast'})
@@ -477,11 +480,157 @@ def collapse_ms_latest_measurement(MS, compound_col='compound', date_col='date',
     return out
 
 
+def rds_query(query, host, database='postgres', cred_file='~/.px_db_password',
+              ca_bundle='global-bundle.pem'):
+    """
+    Read the result of one SQL query on the Px database into a DataFrame, in a read-only session
+    with a verified TLS certificate (the session cannot write). COPY streams the result as CSV,
+    and pandas parses it as it parses the Dropbox exports. Port of the Px_interface helper.
+
+    The p-values are plain decimals with no exponent, so the parse is ``round_trip``: the default
+    parser cuts a decimal after about 17 digits and reads every p below about 1e-17 as 0.
+
+    :param query: SQL text (a trailing ';' is dropped) or a ``psycopg2.sql.Composable``.
+    :param str host: RDS endpoint.
+    :param str database: database name.
+    :param str cred_file: file holding one line ``user:password``.
+    :param str ca_bundle: Amazon RDS CA bundle (``verify-full``).
+    :return: the query result.
+    """
+    import io, psycopg2
+    from psycopg2 import sql
+    if not isinstance(query, sql.Composable):
+        query = sql.SQL(query.strip().rstrip(';'))
+    with open(os.path.expanduser(cred_file)) as fh:
+        user, password = fh.read().strip().split(':', 1)
+    conn = psycopg2.connect(host=host, port=5432, dbname=database, user=user, password=password,
+                            sslmode='verify-full', sslrootcert=os.path.expanduser(ca_bundle),
+                            connect_timeout=10)
+    try:
+        conn.set_session(readonly=True)
+        buf = io.BytesIO()
+        with conn.cursor() as cur:
+            cur.copy_expert(sql.SQL('COPY ({}) TO STDOUT WITH CSV HEADER').format(query), buf)
+    finally:
+        conn.close()
+    buf.seek(0)
+    return pd.read_csv(buf, float_precision='round_trip')
+
+
+def rds_table(table, host, database='postgres', cred_file='~/.px_db_password',
+              ca_bundle='global-bundle.pem'):
+    """
+    Read one table of the Px database: :func:`rds_query` of ``SELECT *`` on the quoted name.
+    COPY streams at about 34 MB/s over the VPN, so ``px_fbx_measure`` takes about 3.4 min.
+
+    :param str table: table name in schema ``public``.
+    :param str host: RDS endpoint.
+    :param str database: database name.
+    :param str cred_file: file holding one line ``user:password``.
+    :param str ca_bundle: Amazon RDS CA bundle.
+    :return: the whole table.
+    """
+    from psycopg2 import sql
+    return rds_query(sql.SQL('SELECT * FROM public.{}').format(sql.Identifier(table)),
+                     host, database, cred_file, ca_bundle)
+
+
 # Target schemas the FBX frames are coerced to (so a plain concat with the
 # existing df_raw / MS frames lines up).
 FBX_DFRAW_COLS = ['MoleculeBatchID', 'MSPlate', 'genes', 'pg', 'logfc', 'pvalue',
                   'adjpval', 'significant', 'uniquecontrast', 'compound', 'batch']
 FBX_MS_COLS = ['compound', 'ndown', 'origin', 'activity', 'date']
+
+# The delivered 'Cmpd Activity' / FBX 'activity' label as a function of ndown. Verified against
+# the delivered pair on 7,218 of 7,219 compounds (2026-10-26).
+ACTIVITY_EDGES  = [-1, 0, 1, 10, 25, np.inf]
+ACTIVITY_LABELS = ['Silent', 'Single (1)', 'Low (2-10)', 'Medium (11-25)', 'High (>25)']
+
+
+def ensure_fbx_plate(df):
+    """
+    Give an FBX frame a ``plate`` column, rebuilt from the ``uniquecontrast`` suffix when the
+    export omits it (the 20260817 schema and the validation tables). Verified exact on the
+    20260814 tranche, 240 of 240 pairs.
+
+    :param df df: an FBX MEASURE / REPORT / MSSCORE frame with ``uniquecontrast``.
+    :return: the frame, with ``plate`` present.
+    """
+    if 'plate' in df.columns:
+        return df
+    return df.assign(plate=df['uniquecontrast'].astype(str).str.split('_complement_').str[-1])
+
+
+def format_fbx_frames(measure, report, *, control_compounds=(), contaminants=(),
+                      drop_plate_substr=('MLN', 'KO', 'Eval'),
+                      dfraw_cols=FBX_DFRAW_COLS, label='', verbose=True):
+    """
+    Crosswalk one FBX MEASURE + REPORT pair into the ``df_raw`` schema plus a per-compound
+    activity summary. Shared by :func:`load_fbx_tranche` (the Dropbox folders) and
+    :func:`load_fbx_rds` (the Px database), so both paths apply the same rules.
+
+    MEASURE carries the per-(gene x experiment) signal keyed by ``uniquecontrast``; REPORT maps
+    ``uniquecontrast`` -> ``srbnumber`` (the full ``MoleculeBatchID``), which splits into
+    ``compound`` (``SRB-XXXXXXX``) + ``batch`` (``NNN``). The MS side keeps the experiment with
+    the highest ``nr_down`` per compound.
+
+    :param df measure: FBX MEASURE rows (``uniquecontrast``, ``genes``, ``pg``, ``logfc``, ...).
+    :param df report: FBX REPORT rows (``uniquecontrast``, ``srbnumber``, ``nr_down``, ``activity``).
+    :param control_compounds: control compound ids to drop entirely.
+    :param contaminants: contaminant compound ids to drop entirely.
+    :param drop_plate_substr: drop any plate whose name holds one of these substrings
+        (case-insensitive — the MLN / KO / Eval conditions).
+    :param list dfraw_cols: target df_raw column order.
+    :param str label: name used in the printed counts (a tranche folder or a date).
+    :param bool verbose: print aggregate counts — no per-compound rows.
+    :return: ``(df_raw_fbx, MS_fbx)``. ``MS_fbx`` holds ``compound | ndown | activity``; the
+        caller stamps ``origin`` and ``date``, because a folder carries one date while the
+        database carries one per experiment.
+    """
+    measure, report = ensure_fbx_plate(measure), ensure_fbx_plate(report)
+
+    # drop unwanted plates (substring match on the plate name, case-insensitive)
+    _pat = '|'.join(drop_plate_substr)
+    _mpl = measure['plate'].astype(str)
+    _dropped = sorted(set(_mpl[_mpl.str.contains(_pat, case=False, na=False)]))
+    measure = measure[~_mpl.str.contains(_pat, case=False, na=False)]
+    report  = report[~report['plate'].astype(str).str.contains(_pat, case=False, na=False)]
+    if verbose and _dropped:
+        print(f'> {label}: dropped {len(_dropped)} plates matching {drop_plate_substr}: {_dropped}')
+
+    # control + contaminant compounds to drop entirely
+    _remove = set(map(str, control_compounds)) | set(map(str, contaminants))
+
+    # uniquecontrast -> srbnumber (MoleculeBatchID) -> compound + batch
+    rep = (report[['uniquecontrast', 'srbnumber']]
+           .dropna(subset=['srbnumber']).drop_duplicates('uniquecontrast'))
+    sp  = rep['srbnumber'].astype(str).str.split('-', n=2, expand=True)
+    rep = rep.assign(MoleculeBatchID=rep['srbnumber'], compound=sp[0] + '-' + sp[1], batch=sp[2])
+
+    # --- df_raw schema (per gene x experiment) ---
+    df_raw_fbx = (measure.merge(rep[['uniquecontrast', 'MoleculeBatchID', 'compound', 'batch']],
+                                on='uniquecontrast', how='left')
+                  .rename(columns={'plate': 'MSPlate'}))
+    n_qc = int(df_raw_fbx['MoleculeBatchID'].isna().sum())           # control/QC contrasts: no compound
+    df_raw_fbx = df_raw_fbx.dropna(subset=['MoleculeBatchID'])[dfraw_cols]
+    n_ctrl = int(df_raw_fbx['compound'].isin(_remove).sum())         # control + contaminant rows
+    df_raw_fbx = df_raw_fbx[~df_raw_fbx['compound'].isin(_remove)]
+
+    # --- MS schema (per-compound activity summary; representative = max nr_down) ---
+    rms = report.dropna(subset=['srbnumber']).copy()
+    s2  = rms['srbnumber'].astype(str).str.split('-', n=2, expand=True)
+    rms['compound'] = s2[0] + '-' + s2[1]
+    rms = rms[~rms['compound'].isin(_remove)]                        # drop controls + contaminants
+    MS_fbx = (rms.sort_values('nr_down', ascending=False).drop_duplicates('compound', keep='first')
+              .rename(columns={'nr_down': 'ndown'})[['compound', 'ndown', 'activity']])
+
+    if verbose:
+        print(f'> {label}: df_raw_fbx {len(df_raw_fbx):,} rows '
+              f'({df_raw_fbx["compound"].nunique():,} compounds, '
+              f'{df_raw_fbx["uniquecontrast"].nunique():,} experiments; '
+              f'{n_qc:,} QC rows w/o compound + {n_ctrl:,} control/contaminant rows dropped) '
+              f'| MS_fbx {len(MS_fbx):,} compounds')
+    return df_raw_fbx, MS_fbx
 
 
 def load_fbx_tranche(tranche_dir, *, control_compounds=(), contaminants=(),
@@ -495,11 +644,7 @@ def load_fbx_tranche(tranche_dir, *, control_compounds=(), contaminants=(),
 
     A tranche folder is named by its export date and holds three CSVs
     (``*_FBX_MEASURE``, ``*_FBX_MSSCORE``, ``*_FBX_REPORT``); only MEASURE and
-    REPORT are used. The crosswalk mirrors ``MS_Interface``'s "combine df_raw &
-    FBX_MEASURE": MEASURE carries the per-(gene × experiment) signal keyed by
-    ``uniquecontrast``; REPORT maps ``uniquecontrast`` → ``srbnumber`` (the full
-    ``MoleculeBatchID``), which splits into ``compound`` (``SRB-XXXXXXX``) +
-    ``batch`` (``NNN``).
+    REPORT are used. :func:`format_fbx_frames` does the crosswalk.
 
     The glob tolerates a re-export suffix (``*_FBX_MEASURE_02.csv``); the date is
     taken from the folder name's leading ``YYYYMMDD`` (so ``20260616_2`` parses to
@@ -526,12 +671,8 @@ def load_fbx_tranche(tranche_dir, *, control_compounds=(), contaminants=(),
     pick = lambda kind: _open(_list(tranche_dir, f'*FBX_{kind}*.csv')[0])
     _cols = ['pg', 'genes', 'uniquecontrast', 'logfc', 'pvalue', 'adjpval', 'significant', 'plate']
     measure = pd.read_csv(pick('MEASURE'),                           # drop the unused 'id' col
-                          usecols=lambda c: c in _cols)
+                          usecols=lambda c: c in _cols, float_precision='round_trip')
     report  = pd.read_csv(pick('REPORT'))
-    # 20260817 onward ships no 'plate'; the uniquecontrast suffix carries it (verified exact, 240/240)
-    for _df in (measure, report):
-        if 'plate' not in _df.columns:
-            _df['plate'] = _df['uniquecontrast'].astype(str).str.split('_complement_').str[-1]
 
     _need = [c for c in ('nr_down', 'activity') if c not in report.columns]
     if _need:                                                        # no activity summary -> no MS rows
@@ -539,49 +680,153 @@ def load_fbx_tranche(tranche_dir, *, control_compounds=(), contaminants=(),
               f'{report["uniquecontrast"].nunique():,} experiments not loaded')
         return pd.DataFrame(columns=dfraw_cols), pd.DataFrame(columns=ms_cols)
 
-    # drop unwanted plates (substring match on the plate name, case-insensitive)
-    _pat = '|'.join(drop_plate_substr)
-    _mpl = measure['plate'].astype(str)
-    _dropped = sorted(set(_mpl[_mpl.str.contains(_pat, case=False, na=False)]))
-    measure = measure[~_mpl.str.contains(_pat, case=False, na=False)]
-    report  = report[~report['plate'].astype(str).str.contains(_pat, case=False, na=False)]
-    if verbose and _dropped:
-        print(f'> {date}: dropped {len(_dropped)} plates matching {drop_plate_substr}: {_dropped}')
+    df_raw_fbx, MS_fbx = format_fbx_frames(
+        measure, report, control_compounds=control_compounds, contaminants=contaminants,
+        drop_plate_substr=drop_plate_substr, dfraw_cols=dfraw_cols, label=date, verbose=verbose)
+    MS_fbx = MS_fbx.assign(origin='MS' + date, date=pd.to_datetime(date[:8]))[ms_cols]
+    return df_raw_fbx, MS_fbx
 
-    # control + contaminant compounds to drop entirely
-    _remove = set(map(str, control_compounds)) | set(map(str, contaminants))
 
-    # uniquecontrast -> srbnumber (MoleculeBatchID) -> compound + batch
-    rep = (report[['uniquecontrast', 'srbnumber']]
-           .dropna(subset=['srbnumber']).drop_duplicates('uniquecontrast'))
-    sp  = rep['srbnumber'].astype(str).str.split('-', n=2, expand=True)
-    rep = rep.assign(MoleculeBatchID=rep['srbnumber'], compound=sp[0] + '-' + sp[1], batch=sp[2])
+def load_fbx_rds(host, *, database='postgres', cred_file='~/.px_db_password',
+                 ca_bundle='global-bundle.pem', px_dates=None, archive_dir=None,
+                 control_compounds=(), contaminants=(),
+                 drop_plate_substr=('MLN', 'KO', 'Eval'),
+                 dfraw_cols=FBX_DFRAW_COLS, ms_cols=FBX_MS_COLS, verbose=True):
+    """
+    Read the FBX side from the Px database instead of the Dropbox tranche folders, and return the
+    same mapping the folders produce: ``{tranche: (df_raw_fbx, MS_fbx)}``, one entry per
+    experiment date. Port of ``Px_interface.DATA.load_rds_fbx`` (2026-10-21), with the MS_ML
+    plate-drop and control-removal rules applied by :func:`format_fbx_frames`.
 
-    # --- df_raw schema (per gene x experiment) ---
-    df_raw_fbx = (measure.merge(rep[['uniquecontrast', 'MoleculeBatchID', 'compound', 'batch']],
-                                on='uniquecontrast', how='left')
-                  .rename(columns={'plate': 'MSPlate'}))
-    n_qc = int(df_raw_fbx['MoleculeBatchID'].isna().sum())           # control/QC contrasts: no compound
-    df_raw_fbx = df_raw_fbx.dropna(subset=['MoleculeBatchID'])[dfraw_cols]
-    n_ctrl = int(df_raw_fbx['compound'].isin(_remove).sum())         # control + contaminant rows
-    df_raw_fbx = df_raw_fbx[~df_raw_fbx['compound'].isin(_remove)]
+    Rules, as in Px_interface:
 
-    # --- MS schema (per-compound activity summary; representative = max nr_down) ---
-    rms = report.dropna(subset=['srbnumber']).copy()
-    s2  = rms['srbnumber'].astype(str).str.split('-', n=2, expand=True)
-    rms['compound'] = s2[0] + '-' + s2[1]
-    rms = rms[~rms['compound'].isin(_remove)]                        # drop controls + contaminants
-    MS_fbx = (rms.sort_values('nr_down', ascending=False).drop_duplicates('compound', keep='first')
-              .rename(columns={'nr_down': 'ndown'})
-              .assign(origin='MS' + date, date=pd.to_datetime(date[:8]))[ms_cols])
+    1. A contrast uploaded two times keeps its newest insert (highest ``id``).
+    2. On a contrast in both a main and a glues table, the **glues copy wins** — a validation
+       export counts as the newer one, as in the tranche folders.
+    3. The database has no datestamp, so ``px_dates`` (``PX_DATES``) carries it; a contrast with
+       no date is skipped. Each date becomes one tranche, named ``YYYYMMDD``.
+    4. ``archive_dir`` (``PX_ARCHIVE_DIR``) fills the experiments the database lacks. On a
+       contrast in both, the database wins.
+
+    :param str host: RDS endpoint (config ``RDS_HOST``).
+    :param str database: database name (config ``RDS_DATABASE``).
+    :param str cred_file: one line ``user:password`` (config ``RDS_CRED_FILE``).
+    :param str ca_bundle: Amazon RDS CA bundle (config ``RDS_CA_BUNDLE``).
+    :param str px_dates: ``PX_DATES`` csv — ``uniquecontrast``, ``date``, ``source``.
+    :param str archive_dir: ``PX_ARCHIVE_DIR`` holding ``fbx_measure.parquet`` / ``fbx_report.parquet``.
+    :param control_compounds: control compound ids to drop entirely.
+    :param contaminants: contaminant compound ids to drop entirely.
+    :param drop_plate_substr: plate-name substrings to drop (MLN / KO / Eval).
+    :param list dfraw_cols: target df_raw column order.
+    :param list ms_cols: target MS column order.
+    :param bool verbose: print aggregate counts.
+    :return: ``{tranche: (df_raw_fbx, MS_fbx)}``, keyed by ``YYYYMMDD``.
+    """
+    read = functools.partial(rds_table, host=host, database=database,
+                             cred_file=cred_file, ca_bundle=ca_bundle)
+    dates = pd.read_csv(px_dates, dtype=str)
+    dates = dates[dates['source'] == 'FBX'].drop_duplicates('uniquecontrast')
+    uc2date = dict(zip(dates['uniquecontrast'], dates['date']))
+
+    frames = {}
+    for kind, key, main, val in (('measure', ['uniquecontrast', 'genes', 'pg'], 'px_fbx_measure', 'px_fbx_glues'),
+                                 ('report', ['uniquecontrast'], 'px_fbx_report', 'px_fbx_glues_report')):
+        # newest insert per row, inside the dated scope
+        m, v = (read(table=t).sort_values('id').drop_duplicates(key, keep='last') for t in (main, val))
+        n_out = len((set(m['uniquecontrast']) | set(v['uniquecontrast'])) - set(uc2date))
+        m, v = (d[d['uniquecontrast'].isin(uc2date)] for d in (m, v))
+
+        # the glues copy of a contrast over its main copy; the archive fills what the database lacks
+        db = pd.concat([v, m[~m['uniquecontrast'].isin(set(v['uniquecontrast']))]], ignore_index=True)
+        arc = pd.read_parquet(os.path.join(archive_dir, f'fbx_{kind}.parquet'))
+        arc = arc[arc['uniquecontrast'].isin(uc2date) & ~arc['uniquecontrast'].isin(set(db['uniquecontrast']))]
+        frames[kind] = ensure_fbx_plate(pd.concat([db, arc], ignore_index=True))
+        if verbose:
+            print(f'> RDS {kind}: {db["uniquecontrast"].nunique():,} experiments from the database + '
+                  f'{arc["uniquecontrast"].nunique():,} from the archive '
+                  f'| {n_out:,} database experiments without a date skipped')
+
+    # one tranche per experiment date, so the caller stacks them as it stacks the folders
+    out = {}
+    for kind in ('measure', 'report'):
+        frames[kind]['_date'] = frames[kind]['uniquecontrast'].map(uc2date)
+    for date in sorted(set(frames['measure']['_date'].dropna())):
+        tranche = pd.to_datetime(date).strftime('%Y%m%d')
+        measure = frames['measure'][frames['measure']['_date'] == date].drop(columns='_date')
+        report  = frames['report'][frames['report']['_date'] == date].drop(columns='_date')
+        df_raw_fbx, MS_fbx = format_fbx_frames(
+            measure, report, control_compounds=control_compounds, contaminants=contaminants,
+            drop_plate_substr=drop_plate_substr, dfraw_cols=dfraw_cols,
+            label=f'RDS {tranche}', verbose=verbose)
+        out[tranche] = (df_raw_fbx,
+                        MS_fbx.assign(origin='MS' + tranche, date=pd.to_datetime(tranche))[ms_cols])
+    return out
+
+
+def ms_from_df_raw(MS, df_raw, edges=ACTIVITY_EDGES, labels=ACTIVITY_LABELS, verbose=True):
+    """
+    Recompute the per-compound activity summary from ``df_raw`` itself, so ``MS`` and ``df_raw``
+    always describe the same rows. The delivered values are kept beside the derived ones.
+
+    Per compound, the representative experiment is the ``uniquecontrast`` with the most
+    significant-down protein groups (the rule the FBX REPORT uses), ties broken by the contrast
+    name so a re-run is deterministic. From that experiment:
+
+    ======================  ====================================================================
+    ``ndown``               protein groups with ``significant == 1`` and ``logfc < 0``
+    ``activity``            the ``ndown`` bin — reproduces the delivered label for 7,218 of 7,219
+    ``ms_score``            ``max(-log10(pvalue) * -logfc)`` over those rows, the canonical formula
+    ``uniquecontrast``      the experiment the three numbers come from
+    ``MSPlate``             its plate
+    ======================  ====================================================================
+
+    The delivered pair moves to ``ndown_src`` / ``activity_src``. A compound with no ``df_raw``
+    row keeps its delivered values — 2 compounds of 7,219 on the 2026-10-19 build. A compound
+    that ``df_raw`` covers but that has no significant-down row is ``Silent`` with ``ndown`` 0.
+    Both get no ``uniquecontrast``, because neither has a representative experiment.
+
+    CAUTION: call this AFTER every row filter (``drop_excluded_dates``, ``drop_cm2rm``), or the
+    numbers describe rows the analysis no longer sees.
+
+    A ``pvalue == 0`` is a parse underflow, not a real zero, so it is floored to the smallest
+    positive p in ``df_raw`` — the convention the volcano code already uses. CAUTION: the floor
+    is a repair, not a fix. Read the exports with ``float_precision='round_trip'`` and rebuild
+    with ``DFRAW_OVERWRITE: true`` to get the true values.
+
+    :param df MS: the per-compound table (``compound``, ``ndown``, ``activity``, ...).
+    :param df df_raw: the per-(gene, compound, experiment) table, already filtered.
+    :param edges: ndown bin edges for ``pd.cut``.
+    :param labels: bin labels, in the same order.
+    :param bool verbose: print how many compounds changed bin.
+    :return: ``MS`` with the derived columns added and the delivered pair renamed.
+    """
+    hit = df_raw[(df_raw['significant'] == 1) & (df_raw['logfc'] < 0)]
+    # floor the underflowed p-values, so -log10 stays finite
+    pmin = df_raw.loc[df_raw['pvalue'] > 0, 'pvalue'].min()
+    pfix = hit['pvalue'].clip(lower=pmin)
+    if verbose and (hit['pvalue'] <= 0).any():
+        print(f'> {int((hit["pvalue"] <= 0).sum()):,} significant-down rows have pvalue == 0 '
+              f'(parse underflow) — floored at {pmin:.3g}; rebuild with DFRAW_OVERWRITE to repair')
+    per = (hit.assign(ms_score=-np.log10(pfix) * -hit['logfc'])
+              .groupby(['compound', 'uniquecontrast', 'MSPlate'], dropna=False)
+              .agg(ndown=('pg', 'nunique'), ms_score=('ms_score', 'max')).reset_index())
+    # the loudest experiment per compound; the contrast name breaks a tie deterministically
+    per = (per.sort_values(['ndown', 'uniquecontrast'], ascending=[False, True])
+              .drop_duplicates('compound', keep='first'))
+
+    out = MS.rename(columns={'ndown': 'ndown_src', 'activity': 'activity_src'}).merge(per, on='compound', how='left')
+    # a compound with no significant-down row is silent, not missing; one with no df_raw row at all keeps its value
+    seen = set(df_raw['compound'])
+    out['ndown'] = out['ndown'].fillna(out['compound'].isin(seen).map({True: 0.0, False: np.nan}))
+    out['ndown'] = out['ndown'].fillna(out['ndown_src'])
+    out['activity'] = pd.cut(out['ndown'], edges, labels=labels).astype(str)
 
     if verbose:
-        print(f'> {date}: df_raw_fbx {len(df_raw_fbx):,} rows '
-              f'({df_raw_fbx["compound"].nunique():,} compounds, '
-              f'{df_raw_fbx["uniquecontrast"].nunique():,} experiments; '
-              f'{n_qc:,} QC rows w/o compound + {n_ctrl:,} control/contaminant rows dropped) '
-              f'| MS_fbx {len(MS_fbx):,} compounds')
-    return df_raw_fbx, MS_fbx
+        moved = int((out['activity'] != out['activity_src']).sum())
+        gone  = int((~out['compound'].isin(seen)).sum())
+        print(f'> MS derived from df_raw: {len(out):,} compounds | {moved:,} change activity bin '
+              f'| {gone:,} keep the delivered value (no df_raw row)')
+    return out
 
 
 def plot_activity_rate_by_tranche(MS, date_col='date', activity_col='activity',
@@ -828,9 +1073,10 @@ def plot_activity_composition_over_time(
 def plot_activity_composition_bars(
         MS, date_col='date', activity_col='activity',
         cats=('Silent', 'Single (1)', 'Low (2-10)', 'Medium (11-25)', 'High (>25)'),
-        colors=None, silent_label='Silent',
+        colors=None, silent_label='Silent', group_col=None, order=None, normalize=False,
+        show_silent=True,
         annotate=True, min_pct_label=3.0, min_label_h_frac=0.03,
-        show_n=True, dpi=150, ax=None):
+        show_n=True, width=0.8, dpi=150, ax=None):
     """
     Stacked **vertical bars** of MS activity composition, one bar per screening
     tranche. Unlike :func:`plot_activity_composition_over_time` (which normalises
@@ -839,6 +1085,15 @@ def plot_activity_composition_bars(
     — while each activity segment is annotated with its **within-tranche
     proportion** (per-segment counts live in the returned ``summary``). Same
     categories / colour palette as the area view.
+
+    With ``group_col`` the bars are one per value of that column (library flavour,
+    cohort, ...) instead of one per tranche date, in ``order`` if given. With
+    ``normalize=True`` every bar is scaled to 100 %, so the y-axis carries the
+    within-bar share and the silent/active split compares across bars of very
+    different size; the count then moves to the ``n=`` label above each bar.
+    ``show_silent=False`` leaves the silent band out of the stack but keeps the
+    shares over **all** compounds, so the bar height becomes the activity rate
+    itself and the segments add up to it.
 
     Expects the unified MS table, one row per compound-tranche::
 
@@ -854,6 +1109,11 @@ def plot_activity_composition_bars(
         ``cats``, recycled if shorter) OR a dict ``{category: colour}``. ``None``
         keeps the built-in palette (shared with the area view).
     :param str silent_label: inactive label (only used to label the activity rate).
+    :param str group_col: group the bars on this column instead of ``date_col``.
+    :param list order: bar order, as values of the grouping column; ``None`` sorts them.
+    :param bool normalize: scale every bar to 100 % (y-axis = share) instead of count.
+    :param bool show_silent: draw the silent band. ``False`` makes the bar height the
+        non-silent share (or count); the shares still divide by every compound.
     :param bool annotate: write each segment's proportion (%) inside it.
     :param float min_pct_label: skip the in-segment label below this share (%) to
         avoid clutter on thin slices.
@@ -861,10 +1121,12 @@ def plot_activity_composition_bars(
         than this fraction of the y-axis — i.e. too thin to fit text without
         overlapping (small tranches); those counts stay in ``summary``.
     :param bool show_n: print the non-silent activity rate + ``n=`` atop each bar.
+    :param float width: bar width in x units, where 1.0 = bars touching (default 0.8).
+        Lower it for thin bars with wide gaps.
     :param int dpi: figure resolution (only used when ``ax`` is None; default 150).
     :param ax: optional matplotlib axes.
-    :return: ``(ax, summary)`` — axes and a per-tranche DataFrame indexed by date
-        with an ``n`` column and one **count** column per category.
+    :return: ``(ax, summary)`` — axes and a per-bar DataFrame indexed by the group
+        value with an ``n`` column and one **count** column per category.
     """
     import matplotlib.pyplot as plt
     import matplotlib.patheffects as pe
@@ -882,51 +1144,63 @@ def plot_activity_composition_bars(
     if activity_col not in df.columns:
         activity_col = next((c for c in df.columns if 'activity' in c.lower()),
                             activity_col)
-    df[date_col] = pd.to_datetime(df[date_col])
+    if group_col is None:
+        group_col = date_col
+        df[group_col] = pd.to_datetime(df[group_col])
 
-    grp   = df.groupby(date_col)
-    dates = sorted(grp.groups)
-    ns    = np.array([len(grp.get_group(d)) for d in dates])
-    counts = np.zeros((len(cats), len(dates)))
-    for j, d in enumerate(dates):
-        vc = grp.get_group(d)[activity_col].value_counts()
+    grp  = df.groupby(group_col)
+    keys = [k for k in order if k in grp.groups] if order else sorted(grp.groups)
+    ns   = np.array([len(grp.get_group(k)) for k in keys])
+    counts = np.zeros((len(cats), len(keys)))
+    for j, k in enumerate(keys):
+        vc = grp.get_group(k)[activity_col].value_counts()
         counts[:, j] = [vc.get(c, 0) for c in cats]
-    # within-tranche shares (column-normalised counts) — for the in-bar labels
+    # within-bar shares (column-normalised counts) — for the in-bar labels
     col_tot = counts.sum(axis=0)
     shares  = np.divide(counts, col_tot, out=np.zeros_like(counts),
                         where=col_tot > 0)
+    heights = shares * 100 if normalize else counts            # bar height: % of the bar, or n
 
     if ax is None:
-        _, ax = plt.subplots(figsize=(1.6 * len(dates) + 3, 5.5), dpi=dpi)
-    x = np.arange(len(dates))
-    y_top = ns.max() * 1.12                                    # axis top; sets the fit threshold
-    bottom = np.zeros(len(dates))
+        _, ax = plt.subplots(figsize=(1.6 * len(keys) + 3, 5.5), dpi=dpi)
+    x = np.arange(len(keys))
+    drawn = [i for i, c in enumerate(cats) if show_silent or c != silent_label]
+    y_top = heights[drawn].sum(axis=0).max() * 1.12            # axis top; sets the fit threshold
+    bottom = np.zeros(len(keys))
     for i, c in enumerate(cats):
-        ax.bar(x, counts[i], bottom=bottom, color=colors[i], label=c,
-               edgecolor='white', linewidth=0.6, width=0.8)
+        if not show_silent and c == silent_label:
+            continue
+        ax.bar(x, heights[i], bottom=bottom, color=colors[i], label=c,
+               edgecolor='white', linewidth=0.6, width=width)
         if annotate:
-            for j in range(len(dates)):
+            for j in range(len(keys)):
                 # label only slices that clear the share floor AND are tall enough to fit text
                 if (shares[i, j] * 100 >= min_pct_label
-                        and counts[i, j] >= min_label_h_frac * y_top):
-                    ax.text(x[j], bottom[j] + counts[i, j] / 2,
+                        and heights[i, j] >= min_label_h_frac * y_top):
+                    ax.text(x[j], bottom[j] + heights[i, j] / 2,
                             f'{shares[i, j]:.0%}',
                             ha='center', va='center', fontsize=8, color='black',
                             path_effects=[pe.withStroke(linewidth=2, foreground='white')])
-        bottom += counts[i]
+        bottom += heights[i]
 
     if show_n:
-        rate = 1 - shares[cats.index(silent_label)]            # non-silent share per tranche
-        for j in range(len(dates)):
-            ax.text(x[j], ns[j], f'{rate[j]:.0%} active\nn={ns[j]:,}',
+        rate = 1 - shares[cats.index(silent_label)]            # non-silent share per bar
+        for j in range(len(keys)):
+            ax.text(x[j], bottom[j], f'{rate[j]:.0%} active\nn={ns[j]:,}',
                     ha='center', va='bottom', fontsize=8.5, fontweight='bold')
 
+    is_date  = group_col == date_col
+    y_name   = ('% active (non-silent)' if not show_silent else '% of compounds') if normalize else \
+               ('active compounds (n)' if not show_silent else 'compounds (n)')
+    bar_name = ('active share' if not show_silent else 'share of compounds') if normalize else \
+               ('active count' if not show_silent else 'compound count')
     ax.set_ylim(0, y_top)
-    ax.set_ylabel('compounds (n)'); ax.set_xlabel('MS tranche')
+    ax.set_ylabel(y_name)
+    ax.set_xlabel('MS tranche' if is_date else group_col)
     ax.set_xticks(x)
-    ax.set_xticklabels([f'{pd.Timestamp(d):%Y-%m-%d}' for d in dates])
-    ax.set_title('MS activity composition by tranche — bar height = compound count',
-                 fontsize=13)
+    ax.set_xticklabels([f'{pd.Timestamp(k):%Y-%m-%d}' if is_date else str(k) for k in keys])
+    ax.set_title(f'MS activity composition by {"tranche" if is_date else group_col}'
+                 f' — bar height = {bar_name}', fontsize=13)
     for s in ('top', 'right'):
         ax.spines[s].set_visible(False)
     # legend top→bottom = stack top→bottom (High first), so it reads like the bars
@@ -934,8 +1208,8 @@ def plot_activity_composition_bars(
     ax.legend(h[::-1], l[::-1], loc='upper left', bbox_to_anchor=(1.02, 1.0),
               frameon=False, fontsize=8)
 
-    summary = pd.DataFrame(counts.T, index=[pd.Timestamp(d) for d in dates], columns=cats)
-    summary.insert(0, 'n', ns); summary.index.name = date_col
+    summary = pd.DataFrame(counts.T.astype(int), index=keys, columns=cats)
+    summary.insert(0, 'n', ns); summary.index.name = group_col
     return ax, summary
 
 
@@ -3898,12 +4172,17 @@ def gene_ms_score(df_raw, genes=None, significant_only=True):
     aggregated the way the 3D gene dots use it — per-gene max over ``significant == 1`` rows
     (Px_interface.py:386)::
 
-        ms_score = (-logfc) * (-log10 pvalue), clipped to [0, 100]
+        ms_score = (-logfc) * (-log10 pvalue)       # not clipped since 2026-10-26
 
     A degrader has ``logfc < 0``, so the product is positive: score = depth of degradation x
-    confidence. A stabilised protein (``logfc > 0``) scores 0 by design. ``pvalue == 0`` gives
-    inf, which clips to exactly 100. The expression below is the algebraically identical
-    one-liner ``logfc * log10(pvalue)``. Note it uses the raw ``pvalue``, not ``adjpval``.
+    confidence. A stabilised protein (``logfc > 0``) scores 0 by design. The expression below is
+    the algebraically identical one-liner ``logfc * log10(pvalue)``. Note it uses the raw
+    ``pvalue``, not ``adjpval``.
+
+    The ``[0, 100]`` clip was removed on 2026-10-26 to match Px_interface: the scale is now raw
+    (0 to about 212). CAUTION: a ``pvalue == 0`` row now scores ``inf`` instead of 100. Read the
+    p-values with ``float_precision='round_trip'`` — the default parser turns every p below
+    about 1e-17 into 0.
 
     ⚠ ``dropna()`` runs over **all** columns, as the canonical does, so a NaN in `pg` or
     `adjpval` removes that row from the score. Pass the whole ``df_raw``: a column subset scores
@@ -3918,7 +4197,7 @@ def gene_ms_score(df_raw, genes=None, significant_only=True):
     sub = sub.dropna()   # canonical: spans EVERY column, so pass the full df_raw (see docstring)
     if significant_only:
         sub = sub[sub['significant'] == 1]
-    score = (sub['logfc'] * np.log10(sub['pvalue'])).clip(lower=0.0, upper=100.0)
+    score = (sub['logfc'] * np.log10(sub['pvalue'])).clip(lower=0.0)
     return score.groupby(sub['genes']).max().rename('ms_score')
 
 
@@ -4285,3 +4564,30 @@ def standout_report_html(df_raw, gene, sel, max_layer=2, cols=None, up_color='#0
             f'<title>{gene} standout report</title>'
             '<body style="font-family:system-ui;max-width:1100px;margin:24px auto">'
             + '\n'.join(blocks) + '</body>')
+
+
+def mols_grid_svg(smiles, legends=None, per_row=4, size=(260, 210)):
+    """Return an inline SVG grid of molecules, ready to drop into an HTML report.
+
+    Inline SVG, not a PNG file: the grid scales, stays sharp and needs no second file next to
+    the report. A smiles RDKit cannot parse is skipped together with its legend.
+
+    :param iterable smiles: one smiles per molecule
+    :param list legends: the label under each molecule, same order as `smiles`
+    :param int per_row: molecules per row
+    :param tuple size: (width, height) of one cell, in px
+    :return str: an ``<svg>`` element, or '' when nothing parses
+    """
+    from rdkit import Chem
+    from rdkit.Chem import Draw
+    smiles = list(smiles)
+    legends = list(legends if legends is not None else [''] * len(smiles))
+    with Chem.rdBase.BlockLogs():          # the caller reports the counts; no per-smiles spam here
+        keep = [(Chem.MolFromSmiles(str(s)), str(g)) for s, g in zip(smiles, legends)]
+    keep = [(m, g) for m, g in keep if m is not None]
+    if not keep:
+        return ''
+    svg = Draw.MolsToGridImage([m for m, _ in keep], legends=[g for _, g in keep],
+                               molsPerRow=min(per_row, len(keep)), subImgSize=size, useSVG=True)
+    svg = svg.data if hasattr(svg, 'data') else str(svg)
+    return svg[svg.find('<svg'):]          # drop the xml declaration so it embeds in a page

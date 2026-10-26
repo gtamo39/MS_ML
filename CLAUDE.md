@@ -165,10 +165,25 @@ If a tool would meaningfully accelerate the work but only runs as a hosted API, 
 
 ## Coding Conventions
 
+### Write code the way I write it — read `/home/gtamo/Simplify/rules.md` first
+
+**Before you write any code, read `/home/gtamo/Simplify/rules.md`.** It holds the house style,
+taken from the pairs in `/home/gtamo/Simplify/examples.md`, which also holds a CONFIRMED four-cell
+sequence that is the target shape. In short: one `##` title per cell, a constants block under it, a
+short `#` label above each block, no rationale in comments, no `def` and no `_` names in a cell, at
+most one `print(df.shape)`, a `.head(3)` as the last line, and every cell must re-run safely. Put a
+`#_> type=sample` tag at the end of a line when the line does not show the type of a name. The
+sample holds names and settings only, never a smiles, a compound id, a label or a prediction. The
+explanation is not lost — it moves to the chat reply and to `wiki/wiki.md`.
+
+When I show you a new before/after pair, add it to `examples.md`, write the notes under
+`Xx Notes xX`, and correct `rules.md`. The example always wins over the rule.
+
 ### Do
 
 - **Read before writing** — always read a file before editing it
 - **Check for existing patterns** — match the style already in the codebase
+- **Never re-import** — before adding an import in a notebook cell or script, check the imports already available above (the notebook's import cell / module header); never duplicate one that is already in scope
 - **Write simplified code** — the fewest clear statements: inline single-use intermediates, derive lists directly, collapse verbose literals; no redundant variables or steps. Prefer a vectorized/built-in expression over a hand-rolled helper function when equally clear (e.g. `.str.extract(...).astype(float)` over a custom `apply` function). Simplify before reporting done — readability first (simple ≠ cryptic one-liner).
 - **Keep comments to 1 line** — 2 lines max, and only if really necessary. Applies to inline/block comments (incl. notebook cell-top `##` comments); docstrings are exempt.
 - **Encapsulate state properly** — use classes or function parameters instead of global variables

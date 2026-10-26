@@ -276,13 +276,18 @@ class DATA():
     def load_proteomics_data(self, params):
         """
         -With DFRAW_OVERWRITE: rebuild df_raw (per-gene logfc/pvalue) and MS (per-compound activity)
-         from the three CDD/Database tranches plus every FBX tranche under FBX_DIR, collapse to the
-         latest batch/date per compound, drop controls+contaminants and non-library compounds, then
-         cache both to DFRAW_PATH / MS_PATH. Otherwise read the cached parquets.
+         from the three CDD/Database tranches plus the FBX side, collapse to the latest batch/date
+         per compound, drop controls+contaminants and non-library compounds, then cache both to
+         DFRAW_PATH / MS_PATH. Otherwise read the cached parquets.
+        -PX_SOURCE picks where the FBX side comes from: 'rds' reads the Px database plus
+         PX_ARCHIVE_DIR (fn.load_fbx_rds), 'dropbox' reads the tranche folders under FBX_DIR.
+         Both give one entry per export date, so everything after the read is the same.
         -Either way, config EXCLUDE_DATES tranches and then the cm2rm compounds are dropped from
          df_raw AND MS (see drop_excluded_dates / drop_cm2rm) — in memory, never from the cache.
          So build cm2rm first: call get_contaminants_and_controls before this.
-        param class params: PARAMS instance (DFRAW_OVERWRITE, RAW_/CLEAN_PROTEOMICS_PATH, PX_*, FBX_DIR, MS_PATH, DFRAW_PATH, EXCLUDE_DATES, DROP_CM2RM)
+        -Last, derive_ms recomputes MS ndown / activity / ms_score from the filtered df_raw. The
+         cache keeps the delivered values, so the parquets need no rebuild for this.
+        param class params: PARAMS instance (DFRAW_OVERWRITE, RAW_/CLEAN_PROTEOMICS_PATH, PX_*, PX_SOURCE, RDS_*, FBX_DIR, DROP_PLATE_SUBSTR, MS_PATH, DFRAW_PATH, EXCLUDE_DATES, DROP_CM2RM, DERIVE_MS)
         return None:
         """
         if not params.DFRAW_OVERWRITE:
@@ -291,6 +296,7 @@ class DATA():
             print(f'> loaded cached MS {self.MS.shape} | df_raw {self.df_raw.shape}')
             self.drop_excluded_dates(params)
             self.drop_cm2rm(params)
+            self.derive_ms(params)
             return
 
         # -------------------
@@ -348,12 +354,22 @@ class DATA():
         # -------------------
         # New (FBX) data
         # -------------------
-        # every tranche folder under FBX_DIR (config.yaml), named by export date
-        TRANCHES = sorted(params.dbx_glob(params.FBX_DIR, '[0-9]*'))
-        _fbx = {os.path.basename(t): fn.load_fbx_tranche(t, control_compounds=self.control_compounds,
-                                                         contaminants=self.contaminants,
-                                                         opener=params.dbx, lister=params.dbx_glob)
-                for t in TRANCHES}
+        # PX_SOURCE picks the FBX side: the Px database, or the tranche folders under FBX_DIR
+        _plates = tuple(getattr(params, 'DROP_PLATE_SUBSTR', None) or ('MLN', 'KO', 'Eval'))
+        if getattr(params, 'PX_SOURCE', 'dropbox') == 'rds':
+            _fbx = fn.load_fbx_rds(params.RDS_HOST, database=params.RDS_DATABASE,
+                                   cred_file=params.RDS_CRED_FILE, ca_bundle=params.RDS_CA_BUNDLE,
+                                   px_dates=params.PX_DATES, archive_dir=params.PX_ARCHIVE_DIR,
+                                   control_compounds=self.control_compounds,
+                                   contaminants=self.contaminants, drop_plate_substr=_plates)
+        else:
+            # every tranche folder under FBX_DIR (config.yaml), named by export date
+            TRANCHES = sorted(params.dbx_glob(params.FBX_DIR, '[0-9]*'))
+            _fbx = {os.path.basename(t): fn.load_fbx_tranche(t, control_compounds=self.control_compounds,
+                                                             contaminants=self.contaminants,
+                                                             drop_plate_substr=_plates,
+                                                             opener=params.dbx, lister=params.dbx_glob)
+                    for t in TRANCHES}
 
         # stack tranches; on a recurring experiment (uniquecontrast) / compound, keep the LATEST export
         df_raw_fbx = (pd.concat([d.assign(_tranche=k) for k, (d, _) in _fbx.items()], ignore_index=True)
@@ -396,6 +412,7 @@ class DATA():
         print(f'> rebuilt MS {self.MS.shape} -> {params.MS_PATH} | df_raw {self.df_raw.shape} -> {params.DFRAW_PATH}')
         self.drop_excluded_dates(params)
         self.drop_cm2rm(params)
+        self.derive_ms(params)
 
     def drop_excluded_dates(self, params):
         """
@@ -435,6 +452,20 @@ class DATA():
         print(f'> DROP_CM2RM: dropped {self.df_raw.loc[drop_raw, "compound"].nunique():,} compounds '
               f'({drop_raw.sum():,} df_raw rows) / {drop_ms.sum():,} MS compounds')
         self.df_raw, self.MS = self.df_raw[~drop_raw], self.MS[~drop_ms]
+
+    def derive_ms(self, params):
+        """
+        -Recompute the MS ndown / activity / ms_score from df_raw (fn.ms_from_df_raw), so MS and
+         df_raw always describe the same rows. The delivered pair stays as ndown_src / activity_src.
+        -Runs LAST, after drop_excluded_dates and drop_cm2rm, so a filtered-out experiment cannot
+         keep feeding a compound's activity. In memory only: MS_PATH keeps the delivered schema,
+         so the derived columns need no rebuild. Set config DERIVE_MS: false to keep the old MS.
+        param class params: PARAMS instance (DERIVE_MS)
+        return None:
+        """
+        if not getattr(params, 'DERIVE_MS', True):
+            return
+        self.MS = fn.ms_from_df_raw(self.MS, self.df_raw)
 
     def load_opentargets(self, params):
         """

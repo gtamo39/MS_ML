@@ -54,6 +54,22 @@ PX_SCREEN_LIB: data/MS/20260513_CDD_FBXO31_PxScreen_Source.csv
 FBX_DIR: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/4_Data_Sciences/15_ML/Daniela/AdvantEidge Platform/Data_Prototype   # streamed over the ssh tunnel (see Dropbox access)
 # tranches are auto-discovered: every date-named subdir (YYYYMMDD…) of FBX_DIR holding *FBX_<KIND>*.csv
 # is loaded + concatenated, and its plate date comes from the folder name — drop in a new folder, nothing to edit.
+
+# Where the FBX side comes from. 'rds' reads the Px database (px_fbx_measure / px_fbx_glues /
+# px_fbx_report / px_fbx_glues_report) + PX_ARCHIVE_DIR for the experiments it lacks, and takes the
+# experiment dates from PX_DATES, because the database has no datestamp. 'dropbox' reads FBX_DIR.
+# The RDS path needs the VPN; the files below are the ones ../Px_interface built on 2026-10-21.
+PX_SOURCE: rds                     # 'rds' | 'dropbox'
+DROP_PLATE_SUBSTR: ['MLN', 'KO', 'Eval']   # plate-name substrings dropped from the FBX side.
+                                      # Add 'VM' / 'BIND' to drop the validation conditions too:
+                                      # 56 of the 6,515 kept rds experiments sit on such a plate.
+
+RDS_HOST: px-seracbio-prod.cfyi0icu0fkt.eu-north-1.rds.amazonaws.com
+RDS_DATABASE: postgres
+RDS_CRED_FILE: ~/.px_db_password                          # one line user:password (1Password)
+RDS_CA_BUNDLE: /home/gtamo/Px_interface/global-bundle.pem  # Amazon RDS CA bundle
+PX_DATES: /home/gtamo/Px_interface/data/PX_dates.csv       # experiment -> plate, date, source
+PX_ARCHIVE_DIR: /home/gtamo/Px_interface/data/px_archive   # Dropbox FBX rows the database lacks
 PLATE_DATE_OVERRIDES: {}              # plate -> 'YYYY-MM-DD' for plates absent from source exports
                                       # (Pw58/60/61/62 now resolve via the 0520 DB export -> 2026-05-20)
 
@@ -78,6 +94,7 @@ HOT_TARGETS: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/1_Biology/T
 # | autoresearch (pickled 
 PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
+FLAVOR_LIB: output/enumeration/202605_FlavorLib/202605_flavorlib.csv
 CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
 SRB_PNG_DIR: data/srb_png            # one <compound>.png structure per SRB id (fn.plot_volcano_pareto)
 DFRAW_PATH: output/MS/df_raw.parquet
@@ -104,7 +121,7 @@ CONTROLS:
 # control_compounds (CONTROLS above) | contaminants (the CONTAMINANTS csv). A `parts=` argument
 # to DATA.get_contaminants_and_controls, or --cm2rm on the CLI, overrides this.
 CM2RM_PARTS: [contaminants, fbx_independent]
-DROP_CM2RM: true              # drop cm2rm from df_raw AND MS at load (in memory; parquets keep them),
+DROP_CM2RM: false              # drop cm2rm from df_raw AND MS at load (in memory; parquets keep them),
                               # so every downstream step inherits it — false keeps them in the frames
 
 # disease association research:
@@ -119,6 +136,8 @@ STOCK_ID_COL: Batch Molecule Batch ID   # batch id (SRB-XXXXXXX-NNN); compound =
 
 GENE_SAR_OUT: output/MS/20260812_geneSAR_R2_full_genome.csv   # per-gene screen results (resumable: delete to redo)
 EXCLUDE_DATES: ['2026-08-13']   # tranches dropped from df_raw AND MS at load (in memory; parquets keep them)
+DERIVE_MS: true                 # recompute MS ndown/activity/ms_score from df_raw after the filters;
+                                # the delivered pair stays as ndown_src / activity_src
 
 # gene-standout search (fn.rank_gene_standout): volcanoes where one gene sits apart from the rest
 STANDOUT_MAX_LAYER: 2       # allowed Pareto depth (1 = strictly on the down frontier)
@@ -138,8 +157,8 @@ STANDOUT_REPORT_DBX: predictions/standout_reports/   # appended to DROPBOX_ML
 STANDOUT_REPORT_LOC: output/MS/standout_reports      # local copy before the push
 STANDOUT_REPORT_MAX: 10     # volcanoes DRAWN per report, top d_any first (0 = all); the table lists every row
 
-CHEMLIB_OVERWRITE: true
-DFRAW_OVERWRITE: false
+CHEMLIB_OVERWRITE: false
+DFRAW_OVERWRITE: true
 
 # Saved MLTrail models:
 FEATURES_TYPE: H237 # prevalence

@@ -20,6 +20,7 @@ import sys
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -214,6 +215,186 @@ class TestLoadFbxTranche(unittest.TestCase):
         self.assertTrue((msx['origin'] == 'MS20260616_2').all())
         # ... but the date still parses (leading 8 digits)
         self.assertEqual(pd.Timestamp(msx['date'].iloc[0]), pd.Timestamp('2026-06-16'))
+
+
+# ======================================================================
+# Tier A — Px database (RDS) source + MS derived from df_raw
+# ======================================================================
+
+def _rds_tables():
+    """The four FBX tables a fake Px database serves, in the real column order.
+
+    uc1 is inserted two times (id 1, then id 5 with a different logfc); uc2 sits in both the main
+    and the glues table; uc8 has no date in PX_DATES. uc4 exists only in the archive.
+    """
+    measure = pd.DataFrame([
+        # uc1, gene A: the OLD insert, then the NEW one
+        dict(id=1, pg='P1', genes='AAA', uniquecontrast='uc1', logfc=-0.5, pvalue=1e-3, adjpval=0.01, significant=1, plate='Pw01'),
+        dict(id=5, pg='P1', genes='AAA', uniquecontrast='uc1', logfc=-2.0, pvalue=1e-9, adjpval=0.01, significant=1, plate='Pw01'),
+        dict(id=2, pg='P2', genes='BBB', uniquecontrast='uc2', logfc=-9.9, pvalue=1e-9, adjpval=0.01, significant=1, plate='Pw02'),
+        dict(id=3, pg='P3', genes='CCC', uniquecontrast='uc3', logfc=-1.0, pvalue=1e-4, adjpval=0.02, significant=1, plate='Pw03'),
+        dict(id=4, pg='P4', genes='DDD', uniquecontrast='uc8', logfc=-1.0, pvalue=1e-4, adjpval=0.02, significant=1, plate='Pw08'),
+    ])
+    glues = pd.DataFrame([
+        dict(id=7, pg='P2', genes='BBB', uniquecontrast='uc2', logfc=-3.0, pvalue=1e-6, adjpval=0.01, significant=1, plate='Pw02'),
+    ])
+    report = pd.DataFrame([
+        dict(id=1, uniquecontrast='uc1', srbnumber='SRB-0000001-001', plate='Pw01', nr_down=4, activity='Low (2-10)'),
+        dict(id=2, uniquecontrast='uc2', srbnumber='SRB-0000002-001', plate='Pw02', nr_down=1, activity='Single (1)'),
+        dict(id=3, uniquecontrast='uc3', srbnumber='SRB-0000003-001', plate='Pw03', nr_down=30, activity='High (>25)'),
+        dict(id=4, uniquecontrast='uc8', srbnumber='SRB-0000008-001', plate='Pw08', nr_down=2, activity='Low (2-10)'),
+    ])
+    glues_report = pd.DataFrame([
+        dict(id=7, uniquecontrast='uc2', srbnumber='SRB-0000002-001', plate='Pw02', nr_down=9, activity='Low (2-10)'),
+    ])
+    return {'px_fbx_measure': measure, 'px_fbx_glues': glues,
+            'px_fbx_report': report, 'px_fbx_glues_report': glues_report}
+
+
+class TestLoadFbxRds(unittest.TestCase):
+    """fn.load_fbx_rds — the Px database as the FBX source, one entry per experiment date."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        pd.DataFrame([
+            dict(uniquecontrast='uc1', molecule_batch_id='SRB-0000001-001', plate='Pw01', date='2026-06-16', source='FBX'),
+            dict(uniquecontrast='uc2', molecule_batch_id='SRB-0000002-001', plate='Pw02', date='2026-06-16', source='FBX'),
+            dict(uniquecontrast='uc3', molecule_batch_id='SRB-0000003-001', plate='Pw03', date='2026-06-30', source='FBX'),
+            dict(uniquecontrast='uc4', molecule_batch_id='SRB-0000004-001', plate='Pw04', date='2026-06-30', source='FBX'),
+            dict(uniquecontrast='uc9', molecule_batch_id='SRB-0000009-001', plate='Pw09', date='2026-04-29', source='df_raw'),
+        ]).to_csv(root / 'PX_dates.csv', index=False)
+        # the archive holds uc4 (the database lacks it) and a stale uc1 (the database wins)
+        pd.DataFrame([
+            dict(id=90, pg='P4', genes='EEE', uniquecontrast='uc4', logfc=-1.5, pvalue=1e-5, adjpval=0.01, significant=1, plate='Pw04'),
+            dict(id=91, pg='P1', genes='AAA', uniquecontrast='uc1', logfc=-0.1, pvalue=0.5, adjpval=0.9, significant=0, plate='Pw01'),
+        ]).to_parquet(root / 'fbx_measure.parquet', index=False)
+        pd.DataFrame([
+            dict(id=90, uniquecontrast='uc4', srbnumber='SRB-0000004-001', plate='Pw04', nr_down=7, activity='Low (2-10)'),
+            dict(id=91, uniquecontrast='uc1', srbnumber='SRB-0000001-001', plate='Pw01', nr_down=99, activity='High (>25)'),
+        ]).to_parquet(root / 'fbx_report.parquet', index=False)
+        self.root = root
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _load(self, **kw):
+        tables = _rds_tables()
+        with unittest.mock.patch.object(fn, 'rds_table', lambda table, **_: tables[table].copy()):
+            return fn.load_fbx_rds('fake-host', px_dates=str(self.root / 'PX_dates.csv'),
+                                   archive_dir=str(self.root), verbose=False, **kw)
+
+    def test_one_entry_per_date_and_schemas(self):
+        """Each experiment date becomes one tranche, in the df_raw / MS schemas the folders give."""
+        out = self._load()
+        # uc1+uc2 are 2026-06-16, uc3+uc4 are 2026-06-30; uc8 has no date, uc9 is not FBX
+        self.assertEqual(sorted(out), ['20260616', '20260630'])
+        dfx, msx = out['20260616']
+        # the loader returns exactly the target schemas, so a plain concat lines up
+        self.assertEqual(list(dfx.columns), fn.FBX_DFRAW_COLS)
+        self.assertEqual(list(msx.columns), fn.FBX_MS_COLS)
+        # origin + date are stamped from the PX_DATES date, as a folder name would stamp them
+        self.assertTrue((msx['origin'] == 'MS20260616').all())
+        self.assertEqual(pd.Timestamp(msx['date'].iloc[0]), pd.Timestamp('2026-06-16'))
+
+    def test_newest_insert_and_glues_win(self):
+        """A contrast uploaded two times keeps the highest id; a glues copy beats the main copy."""
+        dfx, msx = self._load()['20260616']
+        # uc1 keeps the id-5 insert, not the id-1 one
+        self.assertAlmostEqual(dfx.loc[dfx['uniquecontrast'] == 'uc1', 'logfc'].item(), -2.0)
+        # uc2 comes from px_fbx_glues (-3.0), not from px_fbx_measure (-9.9)
+        self.assertAlmostEqual(dfx.loc[dfx['uniquecontrast'] == 'uc2', 'logfc'].item(), -3.0)
+        # the glues REPORT supplies its nr_down too
+        self.assertEqual(msx.loc[msx['compound'] == 'SRB-0000002', 'ndown'].item(), 9)
+
+    def test_archive_fills_only_what_the_database_lacks(self):
+        """uc4 comes from the archive; the archive's stale uc1 never overrides the database."""
+        dfx16, _ = self._load()['20260616']
+        dfx30, _ = self._load()['20260630']
+        # uc4 is present although no table serves it
+        self.assertIn('uc4', set(dfx30['uniquecontrast']))
+        # uc1 keeps the database row (significant), not the archive's non-significant one
+        self.assertEqual(dfx16.loc[dfx16['uniquecontrast'] == 'uc1', 'significant'].item(), 1)
+
+    def test_plate_and_compound_filters_apply(self):
+        """The MS_ML rules still run on the database rows: plate substrings and control ids."""
+        out = self._load(control_compounds=['SRB-0000003'], drop_plate_substr=('Pw01',))
+        dfx16, _ = out['20260616']
+        dfx30, _ = out['20260630']
+        # Pw01 matched the plate-drop rule, so uc1 is gone
+        self.assertNotIn('uc1', set(dfx16['uniquecontrast']))
+        # SRB-0000003 is a control, so uc3 is gone and only the archived uc4 is left
+        self.assertEqual(set(dfx30['compound']), {'SRB-0000004'})
+
+
+class TestEnsureFbxPlate(unittest.TestCase):
+
+    def test_plate_rebuilt_from_the_contrast_suffix(self):
+        """A validation export ships no `plate`; the uniquecontrast suffix carries it."""
+        d = pd.DataFrame({'uniquecontrast': ['SRB1_vs_DMSO_complement_Pw144VM', 'x_complement_Pw02']})
+        # the text after the last '_complement_' becomes the plate
+        self.assertEqual(list(fn.ensure_fbx_plate(d)['plate']), ['Pw144VM', 'Pw02'])
+
+    def test_existing_plate_is_left_alone(self):
+        """A frame that already has `plate` is returned unchanged."""
+        d = pd.DataFrame({'uniquecontrast': ['a_complement_Pw99'], 'plate': ['Pw01']})
+        # the file's own value wins over the name
+        self.assertEqual(fn.ensure_fbx_plate(d)['plate'].item(), 'Pw01')
+
+
+class TestMsFromDfRaw(unittest.TestCase):
+    """fn.ms_from_df_raw — the per-compound summary recomputed from df_raw."""
+
+    def _frames(self, pvalue=1e-8):
+        """df_raw with a loud and a quiet experiment for C1, a silent C2, and an MS row for a
+        compound df_raw never saw (C3)."""
+        rows = [dict(compound='SRB-0000001', uniquecontrast='uc_lo', MSPlate='Pw01', pg=f'P{i}',
+                     logfc=-2.0, pvalue=pvalue, significant=1) for i in range(3)]
+        rows += [dict(compound='SRB-0000001', uniquecontrast='uc_hi', MSPlate='Pw02', pg=f'P{i}',
+                      logfc=-1.0, pvalue=1e-4, significant=1) for i in range(8)]
+        rows += [dict(compound='SRB-0000002', uniquecontrast='uc_s', MSPlate='Pw03', pg='P1',
+                      logfc=0.3, pvalue=0.4, significant=0)]
+        MS = pd.DataFrame({'compound': ['SRB-0000001', 'SRB-0000002', 'SRB-0000003'],
+                           'ndown': [3.0, 0.0, 40.0], 'origin': 'MS20260616',
+                           'activity': ['Low (2-10)', 'Silent', 'High (>25)'],
+                           'date': pd.Timestamp('2026-06-16')})
+        return MS, pd.DataFrame(rows)
+
+    def test_derives_and_keeps_the_delivered_pair(self):
+        """ndown/activity come from df_raw; the delivered pair survives as *_src."""
+        out = fn.ms_from_df_raw(*self._frames(), verbose=False)
+        r1 = out[out['compound'] == 'SRB-0000001'].iloc[0]
+        # the loudest experiment wins: 8 protein groups on uc_hi, not 3 on uc_lo
+        self.assertEqual(r1['ndown'], 8)
+        self.assertEqual(r1['uniquecontrast'], 'uc_hi')
+        self.assertEqual(r1['MSPlate'], 'Pw02')
+        # the bin follows the derived ndown, so Low (2-10) stays Low (2-10) at 8
+        self.assertEqual(r1['activity'], 'Low (2-10)')
+        # the delivered values are untouched
+        self.assertEqual(r1['ndown_src'], 3.0)
+        self.assertEqual(r1['activity_src'], 'Low (2-10)')
+        # ms_score = max over the kept rows of -log10(p) * -logfc = 4 * 1.0
+        self.assertAlmostEqual(r1['ms_score'], 4.0)
+
+    def test_silent_and_uncovered_compounds(self):
+        """A compound df_raw covers but never hits is Silent; one it never saw keeps its value."""
+        out = fn.ms_from_df_raw(*self._frames(), verbose=False).set_index('compound')
+        # covered, no significant-down row -> ndown 0, Silent, no representative experiment
+        self.assertEqual(out.loc['SRB-0000002', 'ndown'], 0)
+        self.assertEqual(out.loc['SRB-0000002', 'activity'], 'Silent')
+        self.assertTrue(pd.isna(out.loc['SRB-0000002', 'uniquecontrast']))
+        # absent from df_raw -> the delivered number is kept rather than read as 0
+        self.assertEqual(out.loc['SRB-0000003', 'ndown'], 40.0)
+        self.assertEqual(out.loc['SRB-0000003', 'activity'], 'High (>25)')
+
+    def test_zero_pvalue_is_floored_not_infinite(self):
+        """A p-value that underflowed to 0 is floored at the smallest positive p in df_raw."""
+        MS, df_raw = self._frames(pvalue=0.0)
+        out = fn.ms_from_df_raw(MS, df_raw, verbose=False)
+        # every scored compound stays finite (SRB-0000003 has no df_raw row, so its score is NaN)
+        self.assertTrue(np.isfinite(out['ms_score'].dropna()).all())
+        # ... and uc_hi still wins on count, so the score is unchanged at 4.0
+        self.assertAlmostEqual(out.loc[out['compound'] == 'SRB-0000001', 'ms_score'].item(), 4.0)
 
 
 # ======================================================================
@@ -493,6 +674,40 @@ class TestSmoke(unittest.TestCase):
         fn.plot_activity_composition_bars(_ms_two_tranches(), annotate=False)
         # bars rendered onto an axes
         self.assertTrue(plt.gcf().get_axes())
+
+    def test_plot_activity_composition_bars_by_group_normalized(self):
+        """group_col + normalize: one 100 % bar per group, in the order asked, counts in the summary."""
+        ms = _ms_two_tranches().assign(flavor=['Music', 'Music', 'Lipo', 'Lipo', 'Sonic', 'Library'])
+        ax, summary = fn.plot_activity_composition_bars(
+            ms, group_col='flavor', order=['Sonic', 'Music', 'Lipo', 'Library', 'Absent'],
+            normalize=True, annotate=False)
+        # a group named in `order` but absent from the frame is skipped, the rest keep that order
+        self.assertEqual(list(summary.index), ['Sonic', 'Music', 'Lipo', 'Library'])
+        # the summary holds counts, not shares — 6 compounds over the 4 bars
+        self.assertEqual(summary['n'].tolist(), [1, 2, 2, 1])
+        # every bar is scaled to 100 %, so the y-axis stops just above it
+        self.assertAlmostEqual(ax.get_ylim()[1], 112)
+        # the x-axis carries the group values, not dates
+        self.assertEqual([t.get_text() for t in ax.get_xticklabels()],
+                         ['Sonic', 'Music', 'Lipo', 'Library'])
+
+    def test_plot_activity_composition_bars_without_silent(self):
+        """show_silent=False: the silent band leaves the stack, so each bar stops at its activity rate."""
+        ms = _ms_two_tranches().assign(flavor=['Music'] * 4 + ['Lipo'] * 2)
+        ax, summary = fn.plot_activity_composition_bars(
+            ms, group_col='flavor', order=['Music', 'Lipo'], normalize=True,
+            show_silent=False, annotate=False)
+        # the silent band is not drawn, so it is absent from the legend
+        self.assertNotIn('Silent', [t.get_text() for t in ax.get_legend().get_texts()])
+        # Music holds 2 silent of 4, so its bar stops at 50 %; Lipo holds none and reaches 100 %
+        tops = [max(b.get_y() + b.get_height() for b in ax.patches
+                    if round(b.get_x() + b.get_width() / 2) == j) for j in (0, 1)]
+        self.assertEqual([round(t) for t in tops], [50, 100])
+        # the axis top follows the tallest bar drawn
+        self.assertAlmostEqual(ax.get_ylim()[1], 112.0)
+        # the summary still counts every compound, silent included
+        self.assertEqual(summary['n'].tolist(), [4, 2])
+        self.assertEqual(summary['Silent'].tolist(), [2, 0])
 
     def test_plot_activity_rate_by_tranche_smoke(self):
         """Per-tranche activity-rate bar plot draws without error."""

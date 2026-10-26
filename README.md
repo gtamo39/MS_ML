@@ -110,6 +110,9 @@ affect the screen and the classifiers alike; the last two only name the registry
 | `EXCLUDE_DATES` | screen dates dropped from `df_raw` **and** `MS` (`DATA.drop_excluded_dates`) — in memory, the parquets keep them, so emptying the key restores them without a rebuild. The gene screen and the classifiers share one cohort |
 | `CM2RM_PARTS` | which blacklists build `cm2rm`: any subset of `contaminants` / `control_compounds` / `fbx_independent`. `--cm2rm a,b` overrides it |
 | `DROP_CM2RM` | `true` drops the `cm2rm` compounds from `df_raw` **and** `MS` at load (`DATA.drop_cm2rm`, after `drop_excluded_dates`) — in memory, the parquets keep them. Every downstream step inherits it, including `--save_non_silent` / `--save_single_low`. `false` keeps them in the frames |
+| `DERIVE_MS` | `true` recomputes `MS` `ndown` / `activity` / `ms_score` from `df_raw` (`DATA.derive_ms`, after `drop_cm2rm`), so the two frames always describe the same rows. The delivered values stay as `ndown_src` / `activity_src`. In memory, the parquets keep the delivered schema. `false` keeps the old `MS` |
+| `PX_SOURCE` | where the FBX side comes from: `rds` reads the Px database (`RDS_*`) plus `PX_ARCHIVE_DIR`, dated by `PX_DATES`; `dropbox` reads the tranche folders under `FBX_DIR`. Both give one entry per export date, so nothing downstream changes |
+| `DROP_PLATE_SUBSTR` | plate-name substrings dropped from the FBX side, case-insensitive. Default `['MLN', 'KO', 'Eval']`; add `VM` / `BIND` to drop the validation conditions too |
 | `NON_SILENT_MODEL_NAME` | MLTrail `experiment_name` for the `ndown > 0` classifier (`--save_non_silent`) |
 | `SINGLELOW_MODEL_NAME` | MLTrail `experiment_name` for the `1 <= ndown <= 12` classifier (`--save_single_low`) |
 
