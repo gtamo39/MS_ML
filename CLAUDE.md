@@ -115,6 +115,50 @@ Obey these rules:
 - **Don't paste data into web tools.** No diagram renderers, no pastebins, no gists, no shared notebooks — even if "just for visualisation".
 - **Don't sync output folders to cloud storage.** Keep `data/`, `output/`, `autoresearch/logs/`, and `tests/files/` out of any auto-syncing path.
 
+### Secrets — `~/.secrets` never crosses the wire
+
+Credentials live in `~/.secrets`, outside every repo. A notebook or a script reads them through
+`localsecrets`, which sits beside the other shared modules in `/home/gtamo/Scripts`:
+
+```python
+import localsecrets as secrets
+
+secrets.var1
+```
+
+`/home/gtamo/Scripts` must be on `sys.path`. A notebook gets it from cell 0
+(`sys.path.insert(0, os.path.abspath('../Scripts'))`); a script gets it from `PYTHONPATH`.
+
+One entry per line, `name:value`, where the value is a Python literal:
+
+```
+var1:'secret1'
+list1:['secret2',2]
+dict1:{'secret3':'secret4'}
+```
+
+A value that is not a Python literal stays a plain string. A line that starts with `#` is a
+comment. `SECRETS_FILE` in the environment points the loader at another file.
+
+CAUTION: the module is `localsecrets`, never `secrets.py`. `/home/gtamo/Scripts` goes on
+`sys.path` **ahead of the standard library**, so a file named `secrets.py` there shadows the
+stdlib `secrets` module and breaks every library that imports it.
+
+Operational rules for the assistant:
+
+- **Never `Read` `~/.secrets`.** Never `cat` / `head` / `tail` / `grep` / `jq` / `sed` it through
+  Bash either. The file has no safe part.
+- **Never print a value that came from it.** `print(secrets.var1)`, an f-string that interpolates
+  one, a `df` built from one, or a notebook cell whose output shows one — all prohibited.
+- **Never write a secret into code, a config, a YAML, a TOML, a notebook cell, a log or a commit.**
+  Write `secrets.var1`; never the value behind it.
+- **Use `localsecrets.names()`** when you need to know what entries exist. It returns names only.
+- Keep `~/.secrets` at `chmod 600`.
+  CAUTION: `/home/gtamo` is itself a git work tree with a GitHub remote. `.secrets` and
+  `.cdd_token` are listed in `/home/gtamo/.gitignore` — keep them there.
+- The same rules cover every other credential file: `~/.cdd_token`, `~/.netrc`, `~/.ssh/*`,
+  `*.pem`, `*.key`, and any `.env`.
+
 ### Claude Code itself is a cloud LLM — the agent's tool outputs cross to Anthropic
 
 Claude Code (the assistant editing this codebase) runs on Anthropic's API. Every `Read` / `Bash` / `Grep` result is sent to Anthropic for inference, regardless of subscription tier (Pro / Team / Enterprise). Subscription tier only changes retention and training terms; it does **not** change whether data crosses the wire.

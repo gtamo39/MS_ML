@@ -60,6 +60,16 @@ def _ms_two_tranches():
                                       'Silent', 'Single (1)', 'Medium (11-25)']})
 
 
+def _volcano_genes():
+    """One compound: 12 significant-down genes D00..D11 whose score grows with the index, one up, one ns."""
+    i = np.arange(12)
+    down = pd.DataFrame({'genes': [f'D{k:02d}' for k in i], 'logfc': -1.5 - 0.2 * i,
+                         'pvalue': 10.0 ** -(2 + i), 'significant': 1.0})
+    rest = pd.DataFrame({'genes': ['UP1', 'NS1'], 'logfc': [2.0, 0.1],
+                         'pvalue': [1e-4, 0.8], 'significant': [1.0, 0.0]})
+    return pd.concat([down, rest], ignore_index=True).assign(compound='C1')
+
+
 class _MockReg:
     """Stand-in for the ML_Reg module: a fixed-R² CV harness so plate-drop
     orchestration can be tested without the real regressor."""
@@ -401,6 +411,169 @@ class TestMsFromDfRaw(unittest.TestCase):
 # Tier A — gene-set / enrichment
 # ======================================================================
 
+class TestTanimotoDistanceMatrix(unittest.TestCase):
+    """Vectorised Tanimoto distance between binary rows."""
+
+    BITS = np.array([[1, 1, 1, 0],       # a
+                     [1, 1, 1, 0],       # b — identical to a
+                     [0, 0, 0, 1],       # c — shares nothing with a
+                     [1, 0, 0, 1],       # d — 1 shared of 4 united with a
+                     [0, 0, 0, 0]])      # e — empty
+
+    def test_known_distances(self):
+        """Identical rows give 0, disjoint rows 1, and 1-of-4 shared gives 0.75."""
+        d = fn.tanimoto_distance_matrix(self.BITS, dtype=np.float64)
+        # the diagonal is zero and the matrix is symmetric
+        self.assertTrue(np.allclose(np.diag(d), 0) and np.allclose(d, d.T))
+        # two identical rows sit on top of each other
+        self.assertAlmostEqual(d[0, 1], 0.0)
+        # two rows sharing no bit are as far apart as the metric allows
+        self.assertAlmostEqual(d[0, 2], 1.0)
+        # a and d share 1 bit of the 4 their union holds
+        self.assertAlmostEqual(d[0, 3], 1 - 1 / 4)
+
+    def test_empty_row_sits_at_distance_one(self):
+        """An all-zero row shares nothing, so it is 1 away from every row but itself."""
+        d = fn.tanimoto_distance_matrix(self.BITS, dtype=np.float64)
+        # distance 1 to all four other rows, 0 to itself
+        self.assertTrue(np.allclose(d[4, :4], 1.0) and d[4, 4] == 0.0)
+
+    def test_matches_the_rdkit_tools_pairwise_version(self):
+        """Same numbers as Rdkit_tools.get_RDKiTTanimoto_distance_matrix, which loops per pair."""
+        import Rdkit_tools as rdkit_tools
+        bits = (np.random.default_rng(0).random((40, 60)) < 0.15).astype(int)
+        frame = pd.DataFrame(bits)
+        frame.insert(0, 'compound', [f'C_{i:03d}' for i in range(len(bits))])
+        ref = rdkit_tools.get_RDKiTTanimoto_distance_matrix(frame, frame).to_numpy()
+        # the two implementations agree to floating-point exactness
+        self.assertTrue(np.allclose(ref, fn.tanimoto_distance_matrix(bits, dtype=np.float64)))
+
+    def test_accepts_a_dataframe(self):
+        """A DataFrame of bits works as well as an array, columns ignored."""
+        d = fn.tanimoto_distance_matrix(pd.DataFrame(self.BITS, columns=list('wxyz')), dtype=np.float64)
+        # same answer as the array form
+        self.assertTrue(np.allclose(d, fn.tanimoto_distance_matrix(self.BITS, dtype=np.float64)))
+
+
+class TestBinarySvdEmbedding(unittest.TestCase):
+    """TF-IDF + SVD features for sparse 0/1 profiles, read with a cosine metric."""
+
+    # proteins 0-2 are co-hit by many compounds; protein 5 is hit alone
+    BITS = np.array([[1, 1, 0, 0, 0, 0],
+                     [1, 1, 1, 0, 0, 0],
+                     [0, 1, 1, 0, 0, 0],
+                     [1, 0, 1, 0, 0, 0],
+                     [1, 0, 0, 0, 0, 0],      # hits only protein 0
+                     [0, 0, 1, 0, 0, 0],      # hits only protein 2
+                     [0, 0, 0, 1, 1, 0],
+                     [0, 0, 0, 1, 1, 0],
+                     [0, 0, 0, 0, 1, 1]])
+
+    def test_shape_and_unit_rows(self):
+        """One row per compound, n_components columns, each row of unit length."""
+        f = fn.binary_svd_embedding(self.BITS, n_components=3)
+        # the requested width
+        self.assertEqual(f.shape, (9, 3))
+        # unit rows, so a dot product is the cosine similarity
+        self.assertTrue(np.allclose(np.linalg.norm(f, axis=1), 1.0))
+
+    def test_reproducible(self):
+        """The same seed gives the same features."""
+        # identical output on a second call
+        self.assertTrue(np.allclose(fn.binary_svd_embedding(self.BITS, 3, random_state=0),
+                                    fn.binary_svd_embedding(self.BITS, 3, random_state=0)))
+
+    def test_co_hit_proteins_bring_compounds_together(self):
+        """Two compounds hitting DIFFERENT but co-hit proteins end up closer than an unrelated pair."""
+        f = fn.binary_svd_embedding(self.BITS, n_components=2)
+        # rows 4 and 5 share no protein, so their Tanimoto distance is 1
+        self.assertEqual(fn.tanimoto_distance_matrix(self.BITS)[4, 5], 1.0)
+        # yet proteins 0 and 2 are co-hit, so in SVD space 4 and 5 sit closer than 4 and 6
+        self.assertGreater(f[4] @ f[5], f[4] @ f[6])
+
+
+class TestPlotSetIntersections(unittest.TestCase):
+    """UpSet view of overlapping gene sets — the replacement for a Venn past 3 sets."""
+
+    SETS = {'Lipo':  ['TP53', 'MYC', 'EGFR', 'CDK4', 'KRAS', 'AKT1'],
+            'Music': ['TP53', 'MYC', 'BRAF', 'AKT1'],
+            'Sonic': ['TP53', 'KRAS', 'BRAF', 'PTEN'],
+            'Macro': ['CDK4', 'EGFR', 'VHL']}
+
+    def test_patterns_partition_the_union(self):
+        """4 sets over 9 distinct genes -> every gene lands in exactly one pattern."""
+        fig, s = fn.plot_set_intersections(self.SETS)
+        # no gene is counted twice and none is lost
+        self.assertEqual(s['size'].sum(), 9)
+        # the pattern label names exactly the sets holding its members, in set order
+        self.assertEqual(s.loc[s['pattern'] == 'Lipo & Music & Sonic', 'members'].item(), 'TP53')
+        # members of a pattern come out sorted
+        self.assertEqual(s.loc[s['pattern'] == 'Lipo & Music', 'members'].item(), 'AKT1;MYC')
+        plt.close(fig)
+
+    def test_unique_and_shared_degrees(self):
+        """A gene in one set only gives a degree-1 pattern; a shared one a higher degree."""
+        fig, s = fn.plot_set_intersections(self.SETS)
+        deg = dict(zip(s['pattern'], s['degree']))
+        # VHL sits in Macro alone, TP53 in three sets
+        self.assertEqual(deg['Macro'], 1)
+        self.assertEqual(deg['Lipo & Music & Sonic'], 3)
+        plt.close(fig)
+
+    def test_sort_and_cuts(self):
+        """sort / min_size / max_patterns choose which patterns reach the figure."""
+        fig, by_size = fn.plot_set_intersections(self.SETS, sort='size')
+        # the size sort runs from the biggest pattern down
+        self.assertEqual(list(by_size['size']), sorted(by_size['size'], reverse=True))
+        fig2, by_deg = fn.plot_set_intersections(self.SETS, sort='degree')
+        # the degree sort puts the unique-to-one patterns first
+        self.assertTrue(by_deg['degree'].is_monotonic_increasing)
+        fig3, big = fn.plot_set_intersections(self.SETS, min_size=2)
+        # a floor of 2 keeps only the patterns two genes or more share
+        self.assertTrue((big['size'] >= 2).all() and len(big) == 2)
+        fig4, cut = fn.plot_set_intersections(self.SETS, max_patterns=2)
+        # the cut applies after the sort
+        self.assertEqual(len(cut), 2)
+        [plt.close(f) for f in (fig, fig2, fig3, fig4)]
+
+    def test_names_panel_replaces_the_bars(self):
+        """`names` prints the members themselves, with the pattern size above each column."""
+        fig, s = fn.plot_set_intersections(self.SETS, names=2)
+        # no bar survives, and every drawn name plus one size label per pattern is text
+        self.assertFalse(fig.axes[0].patches)
+        self.assertEqual(len(fig.axes[0].texts),
+                         sum(min(2, n) for n in s['size']) + len(s))
+        # the size label still carries the full count, not the 2 names shown
+        self.assertIn('2', [t.get_text() for t in fig.axes[0].texts])
+        plt.close(fig)
+
+    def test_rank_orders_names_and_members(self):
+        """`rank` drives both the printed order and the `members` column; `highlight` recolours."""
+        rank = ['VHL', 'TP53', 'MYC', 'AKT1']          # the rest fall back to alphabetical
+        fig, s = fn.plot_set_intersections(self.SETS, names=5, rank=rank, highlight=['VHL'],
+                                           highlight_color='#E65D32')
+        # MYC precedes AKT1 although 'AKT1' sorts first alphabetically
+        self.assertEqual(s.loc[s['pattern'] == 'Lipo & Music', 'members'].item(), 'MYC;AKT1')
+        # a member outside `rank` lands after the ranked ones
+        self.assertEqual(s.loc[s['pattern'] == 'Lipo & Macro', 'members'].item(), 'CDK4;EGFR')
+        # only the highlighted member wears the accent colour
+        self.assertEqual([t.get_text() for t in fig.axes[0].texts if t.get_color() == '#E65D32'],
+                         ['VHL'])
+        plt.close(fig)
+
+    def test_figure_panels(self):
+        """The figure carries the three panels, one bar per pattern and `order`'s rows."""
+        fig, s = fn.plot_set_intersections(self.SETS, order=['Sonic', 'Music', 'Lipo', 'Macro'])
+        # bar panel, dot matrix, set-total panel and the blank corner
+        self.assertEqual(len(fig.axes), 4)
+        # one intersection bar per drawn pattern
+        self.assertEqual(len(fig.axes[0].patches), len(s))
+        # the set rows follow `order`, top to bottom
+        self.assertEqual([t.get_text() for t in fig.axes[1].get_yticklabels()],
+                         ['Sonic', 'Music', 'Lipo', 'Macro'])
+        plt.close(fig)
+
+
 class TestEnrichment(unittest.TestCase):
 
     def test_gene_category_long_shape(self):
@@ -709,6 +882,39 @@ class TestSmoke(unittest.TestCase):
         self.assertEqual(summary['n'].tolist(), [4, 2])
         self.assertEqual(summary['Silent'].tolist(), [2, 0])
 
+    def test_plot_activity_composition_bars_log_size(self):
+        """log_size: each bar stands at log10 n, and its segments split that height by share."""
+        ms = _ms_two_tranches().assign(flavor=['Music'] * 4 + ['Lipo'] * 2)
+        ax, summary = fn.plot_activity_composition_bars(
+            ms, group_col='flavor', order=['Music', 'Lipo'], log_size=True, annotate=False)
+        tops = [max(b.get_y() + b.get_height() for b in ax.patches
+                    if round(b.get_x() + b.get_width() / 2) == j) for j in (0, 1)]
+        # Music holds 4 compounds and Lipo 2, so the bars stop at log10(4) and log10(2)
+        self.assertTrue(np.allclose(tops, np.log10([4, 2])))
+        # Music's bottom (silent) band is 2 of its 4 compounds, so it fills half of the bar
+        silent = next(b.get_height() for b in ax.patches
+                      if round(b.get_x() + b.get_width() / 2) == 0 and b.get_y() == 0)
+        self.assertAlmostEqual(silent, np.log10(4) / 2)
+        # the major ticks sit on whole powers of ten, labelled as sizes
+        self.assertEqual(list(ax.get_yticks())[:2], [0, 1])
+        self.assertEqual(ax.get_yticklabels()[0].get_text(), '1')
+        # the summary still holds counts, not logs
+        self.assertEqual(summary['n'].tolist(), [4, 2])
+
+    def test_plot_activity_composition_bars_bracket(self):
+        """bracket: one span per bar from the first category's bottom to the last one's top, labelled with their sum."""
+        ms = pd.DataFrame({'flavor': ['A'] * 4,
+                           'activity': ['Silent', 'Single (1)', 'Low (2-10)', 'Low (2-10)']})
+        ax, _ = fn.plot_activity_composition_bars(ms, group_col='flavor', normalize=True, annotate=False,
+                                                  show_n=False, bracket=('Single (1)', 'Low (2-10)'))
+        # Single is 1 of 4 and Low 2 of 4, so the bracket reads 75 %
+        self.assertEqual([t.get_text() for t in ax.texts], ['75%'])
+        # the vertical stroke spans 25 % to 100 %: from Single's bottom to Low's top
+        span = next(l for l in ax.lines if len(l.get_xdata()) == 4)
+        self.assertEqual(sorted(span.get_ydata())[::3], [25.0, 100.0])
+        # bracket lines never reach the legend
+        self.assertNotIn('_child', ' '.join(t.get_text() for t in ax.get_legend().get_texts()))
+
     def test_plot_activity_rate_by_tranche_smoke(self):
         """Per-tranche activity-rate bar plot draws without error."""
         fn.plot_activity_rate_by_tranche(_ms_two_tranches(), annotate=False)
@@ -736,6 +942,37 @@ class TestSmoke(unittest.TestCase):
         fn.plot_volcano(df, 'C1', 'TP53')
         # volcano rendered onto an axes
         self.assertTrue(plt.gcf().get_axes())
+
+    def test_plot_volcano_labels_top_down_genes(self):
+        """gene=None labels the top_n down genes, the highest -logfc * -log10 p first.
+
+        12 significant-down genes whose score grows with the index, plus one up and
+        one ns gene: the default top_n=10 must label D02..D11 and nothing else.
+        """
+        fig, ax = plt.subplots()
+        fn.plot_volcano(_volcano_genes(), 'C1', None, ax=ax)
+        # exactly the ten highest-scoring down genes carry a label
+        self.assertEqual(sorted(t.get_text() for t in ax.texts if t.get_text()),
+                         [f'D{i:02d}' for i in range(2, 12)])
+        plt.close(fig)
+
+    def test_plot_volcano_silent_gets_no_label(self):
+        """gene=None on a Silent compound (no significant row with logfc < 0) labels nothing,
+        although the thresholds still colour the same genes as down."""
+        fig, ax = plt.subplots()
+        fn.plot_volcano(_volcano_genes().assign(significant=0.0), 'C1', None, ax=ax)
+        # no label: the significant flag, not the thresholds, decides the Silent case
+        self.assertFalse([t for t in ax.texts if t.get_text()])
+        plt.close(fig)
+
+    def test_plot_volcano_save_path(self):
+        """save_path writes the figure and creates the folder that does not exist yet."""
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / 'new' / 'volcano.png'
+            fn.plot_volcano(_volcano_genes(), 'C1', None, save_path=str(out))
+            # the png exists in the folder the helper created
+            self.assertTrue(out.exists())
+        plt.close('all')
 
     def test_plot_autoresearch_progress_smoke(self):
         """Progress plot reads the sample JSONL log and returns (fig, ax)."""

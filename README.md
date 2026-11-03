@@ -10,8 +10,9 @@ let's go through the Jupyter Notebook located in vignettes/main.py
 * OR with conda (recommended) `conda create -n ML python=3.12.3` then `conda activate ML`
   * **Use Python 3.12, not 3.13** — on 3.13 `pip install` tries to build `pyarrow` from source (no cp313 wheel for the pinned version) and fails with `ModuleNotFoundError: No module named 'pkg_resources'`.
 * install dependencies: `pip install -r requirements.txt` (needs `git` on PATH — `descriptastorus` is pinned to a git commit, see below)
-* install Vina: `conda install conda-forge::vina`
-* install OpenBabel: `conda install -c conda-forge openbabel`
+* install Vina and OpenBabel: `conda install -c conda-forge vina openbabel`
+  * Conda-only — neither is on PyPI, so neither is in `requirements.txt`. Install them into the `ML` env, after `conda activate ML`.
+  * Installed in `ML`: `vina` 1.2.7, `openbabel` 3.2.1 (`py312` builds — they must match the env's Python 3.12).
 * `python -m ipykernel install --user --name ML --display-name "Python (ML)"`
 
 ### Chemistry features (`FEATURES_TYPE` in `config/config.yaml`)

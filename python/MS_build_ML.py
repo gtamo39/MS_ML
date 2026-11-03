@@ -220,7 +220,8 @@ class DATA():
 
     def load_chemical_lib_df(self, params):
         """
-        -Load the compound library (name + smiles + Px annotations). With CHEMLIB_OVERWRITE, pull the
+        -Load the compound library (name + smiles + Px annotations + the Lib ID / Lib Flavor /
+         Largest_Vector batch fields). With CHEMLIB_OVERWRITE, pull the
          latest straight from CDD Vault (collections AJ/AK) and cache to CHEMLIB_PATH; otherwise read
          the cached csv. Coerce the yes/no annotation columns to 1/0/NaN.
         -Derive the validated / devalidated target lists from Px_Ligase_dependent + Px_Target_interest.
@@ -232,7 +233,8 @@ class DATA():
                                     columns=['name', 'Batch Mol-Batch ID', 'smiles', 'Px_repetition(yes/no)',
                                              'Px_validated_WT(yes/no)', 'Px_Ligase_dependent(yes/no)',
                                              'Px_NameLigase_dependent', 'Px_Target_info', 'Px_Target_interest',
-                                             'Largest_Vector', 'Largest_Vector_Lenght'])
+                                             'Largest_Vector', 'Largest_Vector_Lenght',
+                                             'Lib ID', 'Lib Flavor'])
                              .rename(columns={'name': 'compound'}))
             self.serac_df.to_csv(params.CHEMLIB_PATH, sep=',', index=False)
         else:

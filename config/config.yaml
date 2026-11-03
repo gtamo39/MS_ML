@@ -120,8 +120,8 @@ CONTROLS:
 # Any subset of: fbx_independent (serac_df Px_Ligase_dependent == 0 or Px_validated_WT == 0) |
 # control_compounds (CONTROLS above) | contaminants (the CONTAMINANTS csv). A `parts=` argument
 # to DATA.get_contaminants_and_controls, or --cm2rm on the CLI, overrides this.
-CM2RM_PARTS: [contaminants, fbx_independent]
-DROP_CM2RM: false              # drop cm2rm from df_raw AND MS at load (in memory; parquets keep them),
+CM2RM_PARTS: [contaminants] # [contaminants, fbx_independent]
+DROP_CM2RM: true              # drop cm2rm from df_raw AND MS at load (in memory; parquets keep them),
                               # so every downstream step inherits it — false keeps them in the frames
 
 # disease association research:
@@ -135,7 +135,7 @@ STOCK_SHEET: Solid(II)
 STOCK_ID_COL: Batch Molecule Batch ID   # batch id (SRB-XXXXXXX-NNN); compound = its SRB-XXXXXXX prefix
 
 GENE_SAR_OUT: output/MS/20260812_geneSAR_R2_full_genome.csv   # per-gene screen results (resumable: delete to redo)
-EXCLUDE_DATES: ['2026-08-13']   # tranches dropped from df_raw AND MS at load (in memory; parquets keep them)
+EXCLUDE_DATES: [] # ['2026-08-13']   # tranches dropped from df_raw AND MS at load (in memory; parquets keep them)
 DERIVE_MS: true                 # recompute MS ndown/activity/ms_score from df_raw after the filters;
                                 # the delivered pair stays as ndown_src / activity_src
 
@@ -158,7 +158,7 @@ STANDOUT_REPORT_LOC: output/MS/standout_reports      # local copy before the pus
 STANDOUT_REPORT_MAX: 10     # volcanoes DRAWN per report, top d_any first (0 = all); the table lists every row
 
 CHEMLIB_OVERWRITE: false
-DFRAW_OVERWRITE: true
+DFRAW_OVERWRITE: false
 
 # Saved MLTrail models:
 FEATURES_TYPE: H237 # prevalence

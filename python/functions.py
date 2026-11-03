@@ -1074,7 +1074,7 @@ def plot_activity_composition_bars(
         MS, date_col='date', activity_col='activity',
         cats=('Silent', 'Single (1)', 'Low (2-10)', 'Medium (11-25)', 'High (>25)'),
         colors=None, silent_label='Silent', group_col=None, order=None, normalize=False,
-        show_silent=True,
+        show_silent=True, log_size=False, bracket=None,
         annotate=True, min_pct_label=3.0, min_label_h_frac=0.03,
         show_n=True, width=0.8, dpi=150, ax=None):
     """
@@ -1121,6 +1121,16 @@ def plot_activity_composition_bars(
         than this fraction of the y-axis — i.e. too thin to fit text without
         overlapping (small tranches); those counts stay in ``summary``.
     :param bool show_n: print the non-silent activity rate + ``n=`` atop each bar.
+    :param bool log_size: bar height = log10 of the bar's compound count, on a **linear**
+        axis whose ticks read as sizes (1, 10, 100, ...), and the segments split that height
+        by their share — so library size compares across bars while every segment keeps its
+        within-bar proportion. A true log axis is not used because it distorts stacked
+        segments. Takes precedence over ``normalize``; meant with ``show_silent=True``,
+        so the segments add up to the full bar.
+    :param tuple bracket: adjacent categories to group beside each bar, e.g.
+        ``('Single (1)', 'Low (2-10)')``. A bracket spans their segments and points to their
+        combined share of the bar, so it reads as the sum of their in-bar labels. The
+        categories must sit next to each other in ``cats``. None draws no bracket.
     :param float width: bar width in x units, where 1.0 = bars touching (default 0.8).
         Lower it for thin bars with wide gaps.
     :param int dpi: figure resolution (only used when ``ax`` is None; default 150).
@@ -1159,7 +1169,8 @@ def plot_activity_composition_bars(
     col_tot = counts.sum(axis=0)
     shares  = np.divide(counts, col_tot, out=np.zeros_like(counts),
                         where=col_tot > 0)
-    heights = shares * 100 if normalize else counts            # bar height: % of the bar, or n
+    heights = (shares * np.log10(ns) if log_size else          # bar height: log10 n, % of the bar, or n
+               shares * 100 if normalize else counts)
 
     if ax is None:
         _, ax = plt.subplots(figsize=(1.6 * len(keys) + 3, 5.5), dpi=dpi)
@@ -1167,9 +1178,11 @@ def plot_activity_composition_bars(
     drawn = [i for i, c in enumerate(cats) if show_silent or c != silent_label]
     y_top = heights[drawn].sum(axis=0).max() * 1.12            # axis top; sets the fit threshold
     bottom = np.zeros(len(keys))
+    seg = {}                                                   # category -> (bottom, top) of its segment
     for i, c in enumerate(cats):
         if not show_silent and c == silent_label:
             continue
+        seg[c] = (bottom.copy(), bottom + heights[i])
         ax.bar(x, heights[i], bottom=bottom, color=colors[i], label=c,
                edgecolor='white', linewidth=0.6, width=width)
         if annotate:
@@ -1189,11 +1202,28 @@ def plot_activity_composition_bars(
             ax.text(x[j], bottom[j], f'{rate[j]:.0%} active\nn={ns[j]:,}',
                     ha='center', va='bottom', fontsize=8.5, fontweight='bold')
 
+    if bracket:
+        lo, hi = seg[bracket[0]][0], seg[bracket[-1]][1]
+        share = shares[[cats.index(c) for c in bracket]].sum(axis=0)
+        e = x + width / 2                                      # right edge of each bar
+        for j in range(len(keys)):
+            mid = (lo[j] + hi[j]) / 2
+            ax.plot([e[j] + 0.02, e[j] + 0.06, e[j] + 0.06, e[j] + 0.02], [hi[j], hi[j], lo[j], lo[j]],
+                    color='#2F2F2F', lw=0.9)
+            ax.plot([e[j] + 0.06, e[j] + 0.10], [mid, mid], color='#2F2F2F', lw=0.9)
+            ax.text(e[j] + 0.11, mid, f'{share[j]:.0%}', ha='left', va='center', fontsize=8)
+        ax.set_xlim(x[0] - width / 2 - 0.3, x[-1] + width / 2 + 0.45)
+
     is_date  = group_col == date_col
     y_name   = ('% active (non-silent)' if not show_silent else '% of compounds') if normalize else \
                ('active compounds (n)' if not show_silent else 'compounds (n)')
     bar_name = ('active share' if not show_silent else 'share of compounds') if normalize else \
                ('active count' if not show_silent else 'compound count')
+    if log_size:
+        y_name, bar_name = 'compounds (log scale)', 'log10 library size'
+        top = int(np.ceil(y_top))
+        ax.set_yticks(range(top + 1), [f'{10 ** k:,}' for k in range(top + 1)])
+        ax.set_yticks([np.log10(m * 10 ** k) for k in range(top) for m in range(2, 10)], minor=True)
     ax.set_ylim(0, y_top)
     ax.set_ylabel(y_name)
     ax.set_xlabel('MS tranche' if is_date else group_col)
@@ -1211,6 +1241,188 @@ def plot_activity_composition_bars(
     summary = pd.DataFrame(counts.T.astype(int), index=keys, columns=cats)
     summary.insert(0, 'n', ns); summary.index.name = group_col
     return ax, summary
+
+def tanimoto_distance_matrix(bits, dtype=np.float32):
+    """
+    Pairwise Tanimoto (Jaccard) distance between binary rows, by matrix product.
+
+    Vectorised sibling of ``Rdkit_tools.get_RDKiTTanimoto_distance_matrix``, which
+    calls a Python function once per pair: measured 2026-10-28, that one needs about
+    55 minutes on 5,200 x 11,050 bits where this needs under a minute, for the same
+    numbers. Use it on Morgan bits, on a binary protein profile, on any 0/1 matrix.
+
+    An all-zero row shares nothing with anything, so it lands at distance 1 from every
+    other row. Drop those rows before an embedding — they carry no information and they
+    pull the layout.
+
+    :param bits: compounds x features, 0/1, as an array or a DataFrame.
+    :param dtype: accumulation dtype. float32 halves the memory; float64 is exact.
+    :return: ``(n, n)`` ndarray of distances in [0, 1], zero on the diagonal.
+    """
+    b = np.asarray(bits, dtype=dtype)
+    inter = b @ b.T
+    rs = b.sum(1)
+    d = np.clip(1.0 - inter / np.maximum(rs[:, None] + rs[None, :] - inter, 1e-9), 0.0, 1.0)
+    np.fill_diagonal(d, 0.0)
+    return d
+
+
+def binary_svd_embedding(bits, n_components=30, random_state=0):
+    """
+    Dense, graded features for sparse 0/1 profiles: TF-IDF weighting, truncated SVD,
+    then L2 normalisation — the latent-semantic recipe from text mining, applied to
+    compound x protein hit matrices.
+
+    Why: on sparse bits, Tanimoto is degenerate — most pairs share nothing and sit at
+    exactly 1 — so a t-SNE on it keeps the input neighbourhoods poorly. Measured
+    2026-10-29 on 692 Single+Low compounds x 8,324 proteins: trustworthiness 0.71 on
+    Tanimoto against 0.97 here, at the same flavour kNN purity. TF-IDF also stops a
+    protein that every compound hits from dominating every similarity, and SVD lets two
+    compounds hitting *different* proteins that are often co-hit end up close.
+
+    A row whose proteins nobody else hits projects to almost nothing and lands far from
+    everything; drop those rows first (see :func:`tanimoto_distance_matrix`).
+
+    :param bits: compounds x features, 0/1, as an array or a DataFrame.
+    :param int n_components: SVD dimensions kept.
+    :param int random_state: SVD seed, so the features are reproducible.
+    :return: ``(n, n_components)`` ndarray with unit-length rows, for a cosine metric.
+    """
+    from sklearn.feature_extraction.text import TfidfTransformer
+    from sklearn.decomposition import TruncatedSVD
+    from sklearn.preprocessing import normalize
+    tfidf = TfidfTransformer().fit_transform(np.asarray(bits, dtype=np.float32))
+    return normalize(TruncatedSVD(n_components, random_state=random_state).fit_transform(tfidf))
+
+
+def plot_set_intersections(sets, order=None, min_size=1, max_patterns=25, sort='size',
+                           names=0, rank=None, highlight=(), highlight_color='#E65D32',
+                           bar_color='#0EA5CE', total_color='#A6C8E4', dot_color='#2F2F2F',
+                           empty_color='#E3E0DA', dpi=150):
+    """
+    UpSet view of how several sets overlap — the readable replacement for a Venn
+    diagram once there are more than three sets. A 4-set Venn needs ellipses and a
+    5-set one has 31 regions; here every combination is one column, so the plot
+    stays legible for any number of sets.
+
+    Three panels share their axes:
+
+    * **top right** — one bar per membership *pattern*, its height the number of
+      members carrying exactly that pattern. A degree-1 pattern is "unique to this
+      set"; the full-degree pattern is "shared by all". With ``names`` the bar gives
+      way to the member names themselves, best ranked first, the pattern size printed
+      above them.
+    * **bottom right** — the dot matrix naming each pattern: a filled dot for every
+      set in it, joined by a line.
+    * **bottom left** — one horizontal bar per set, its total size.
+
+    Patterns nobody carries are never drawn, which is what keeps the figure small:
+    5 sets allow 31 patterns, but real data usually fills far fewer.
+
+    :param dict sets: ``{set name: iterable of members}``.
+    :param list order: set order, top to bottom; default the order of ``sets``.
+    :param int min_size: drop a pattern carried by fewer members than this.
+    :param int max_patterns: keep at most this many patterns after the sort.
+    :param str sort: ``'size'`` — biggest pattern first; ``'degree'`` — the unique-to-one
+        patterns first, then the pairs, and so on.
+    :param int names: print this many member names per pattern instead of drawing a
+        bar. 0 keeps the bars. The pattern size still prints above each column, so a
+        pattern of 641 members shows its top ``names`` and the figure 641.
+    :param rank: members in priority order, best first — it orders the names inside
+        every pattern and the ``members`` column. Members it omits come last,
+        alphabetically. None ranks alphabetically.
+    :param highlight: members drawn in ``highlight_color`` and in bold, e.g. a hot-target list.
+    :param str highlight_color: colour of a highlighted name.
+    :param str bar_color: intersection bar colour.
+    :param str total_color: per-set total bar colour.
+    :param str dot_color: colour of a dot inside the pattern.
+    :param str empty_color: colour of a dot outside it.
+    :param int dpi: figure resolution.
+    :return: ``(fig, summary)`` — the figure and a DataFrame with one row per drawn
+        pattern: ``pattern``, ``degree``, ``size``, and the ``members`` themselves
+        as a ``;``-joined string in ``rank`` order. Rows the ``min_size`` / ``max_patterns`` cut
+        removed are absent, so ``summary['size'].sum()`` can fall short of the union.
+    """
+    import matplotlib.pyplot as plt
+    keys = list(order) if order is not None else list(sets)
+    memb = {k: set(sets[k]) for k in keys}
+
+    # membership pattern of every member of the union
+    pat = {}
+    for m in sorted(set().union(*memb.values()) if memb else []):
+        pat.setdefault(tuple(k for k in keys if m in memb[k]), []).append(m)
+    pos = {m: i for i, m in enumerate(rank if rank is not None else [])}
+    items = [(p, sorted(g, key=lambda m: (pos.get(m, len(pos)), m)))
+             for p, g in pat.items() if len(g) >= min_size]
+    items.sort(key=(lambda x: (-len(x[1]), len(x[0]))) if sort == 'size' else
+                   (lambda x: (len(x[0]), -len(x[1]))))
+    items = items[:max_patterns]
+    summary = pd.DataFrame([{'pattern': ' & '.join(p), 'degree': len(p),
+                             'size': len(g), 'members': ';'.join(g)} for p, g in items])
+
+    n_pat, n_set = len(items), len(keys)
+    h_top, h_bot = (0.17 * names + 0.9) if names else 3.0, 0.34 * n_set + 1.2
+    fig = plt.figure(figsize=(max(6.0, (0.58 if names else 0.46) * n_pat + 3.2), h_top + h_bot),
+                     dpi=dpi, layout='constrained')
+    fig.get_layout_engine().set(w_pad=0.02, h_pad=0.02, wspace=0.01, hspace=0.01)
+    gs = fig.add_gridspec(2, 2, width_ratios=[1, 3.4], height_ratios=[h_top, h_bot])
+    ax_bar = fig.add_subplot(gs[0, 1])
+    ax_dot = fig.add_subplot(gs[1, 1], sharex=ax_bar)
+    ax_tot = fig.add_subplot(gs[1, 0], sharey=ax_dot)
+    fig.add_subplot(gs[0, 0]).axis('off')
+
+    # top right — the members of each pattern, or how many carry it
+    x, sizes = np.arange(n_pat), summary['size'].to_numpy()
+    if names:
+        hi = set(highlight)
+        for j, (_, g) in enumerate(items):
+            ax_bar.text(j, names + 0.5, f'{len(g):,}', ha='center', va='bottom',
+                        fontsize=8, color=bar_color, fontweight='bold')
+            for r, m in enumerate(g[:names]):
+                ax_bar.text(j, names - 1 - r, m, ha='center', va='center', fontsize=7,
+                            color=highlight_color if m in hi else dot_color,
+                            fontweight='bold' if m in hi else 'normal')
+        ax_bar.set_ylabel(f'top {names} members')
+        ax_bar.set_ylim(-0.6, names + 1.6)
+        ax_bar.set_yticks([])
+    else:
+        ax_bar.bar(x, sizes, color=bar_color, width=0.62)
+        for xi, v in zip(x, sizes):
+            ax_bar.text(xi, v + sizes.max() * 0.02, f'{v:,}', ha='center', va='bottom', fontsize=8)
+        ax_bar.set_ylabel('members in the pattern')
+        ax_bar.set_ylim(0, sizes.max() * 1.16 if n_pat else 1)
+        ax_bar.grid(axis='y', color=empty_color, lw=0.6)
+        ax_bar.set_axisbelow(True)
+    ax_bar.set_xlim(-0.6, n_pat - 0.4)
+    ax_bar.tick_params(bottom=False, labelbottom=False)
+
+    # bottom right — which sets each pattern is made of
+    y = np.arange(n_set)[::-1]
+    sel = np.array([[k in p for p, _ in items] for k in keys], dtype=bool).reshape(n_set, n_pat)
+    for i in range(n_set):
+        ax_dot.scatter(x, np.full(n_pat, y[i]), s=78, zorder=2,
+                       color=np.where(sel[i], dot_color, empty_color))
+    for j in range(n_pat):
+        on = y[sel[:, j]]
+        if len(on) > 1:
+            ax_dot.plot([j, j], [on.min(), on.max()], color=dot_color, lw=1.8, zorder=1)
+    ax_dot.set_yticks(y, keys, fontsize=9)
+    ax_dot.set_ylim(-0.6, n_set - 0.4)
+    ax_dot.set_xlim(-0.6, n_pat - 0.4)
+    ax_dot.tick_params(bottom=False, labelbottom=False, left=False)
+
+    # bottom left — how big each set is on its own
+    ax_tot.barh(y, [len(memb[k]) for k in keys], color=total_color, height=0.5)
+    ax_tot.set_xlabel('set size')
+    ax_tot.invert_xaxis()
+    ax_tot.tick_params(left=False, labelleft=False)
+    ax_tot.grid(axis='x', color=empty_color, lw=0.6)
+    ax_tot.set_axisbelow(True)
+
+    for a in (ax_bar, ax_dot, ax_tot):
+        for s in a.spines.values():
+            s.set_visible(False)
+    return fig, summary
 
 
 def plot_activity_area_absolute(
@@ -2100,6 +2312,7 @@ def plot_volcano(df, compound, gene,
                  xmin=-5.0, xmax=5.0,
                  figsize=(6, 6), dpi=100,
                  up_color='#008bfb', down_color='#ff0051',
+                 top_n=10, save_path=None,
                  ax=None, title=None):
     """
     Volcano plot for a single compound, with one target gene highlighted.
@@ -2110,16 +2323,25 @@ def plot_volcano(df, compound, gene,
     + annotated so you can see where the target of interest lands relative to
     the rest of the proteome.
 
-    :param df df: must contain columns ``compound``, ``genes``, ``logfc``, ``pvalue``.
+    With ``gene=None`` the ``top_n`` down genes are labelled instead, the highest
+    ``-logfc * -log10(p)`` first (the ``ms_score`` of :func:`ms_from_df_raw`).
+    When ``df`` has a ``significant`` column, a label also needs a significant row
+    with ``logfc < 0`` (the ``ndown`` rule), so a Silent compound gets no label.
+
+    :param df df: must contain columns ``compound``, ``genes``, ``logfc``, ``pvalue``;
+        an optional 0/1 ``significant`` column gates the ``gene=None`` labels.
     :param str compound: e.g. ``'SRB-0000615'``.
     :param str gene: gene symbol to highlight (e.g. ``'KDM1B'``); silently
-        ignored if not measured for that compound.
+        ignored if not measured for that compound; ``None`` labels the top down genes.
     :param float fc_thresh, p_thresh: logfc / p-value thresholds for the
         significance buckets and the dashed reference lines.
     :param float xmin, xmax: x-axis limits (logfc range).
     :param tuple figsize: figure size in inches, used only when ``ax is None``.
     :param int dpi: DPI for the new figure, used only when ``ax is None``.
     :param str up_color, down_color: hex strings for significantly up/down dots.
+    :param int top_n: number of down genes labelled when ``gene is None``.
+    :param str save_path: file to write the figure to, at the figure's DPI; the
+        extension sets the format and a missing folder is created. ``None`` -> no file.
     :param Axes ax: existing matplotlib Axes to draw into; if ``None`` a new
         figure is created.
     :param str title: optional custom title; default = ``f'{compound}  (N genes)'``.
@@ -2129,7 +2351,9 @@ def plot_volcano(df, compound, gene,
     """
     import matplotlib.pyplot as plt
 
-    sub = df[df['compound'] == compound][['genes', 'logfc', 'pvalue']].dropna()
+    has_sig = 'significant' in df.columns
+    cols = ['genes', 'logfc', 'pvalue'] + (['significant'] if has_sig else [])
+    sub = df[df['compound'] == compound][cols].dropna(subset=['genes', 'logfc', 'pvalue'])
     if sub.empty:
         print(f'> {compound}: no rows in df_raw')
         return None
@@ -2163,9 +2387,9 @@ def plot_volcano(df, compound, gene,
 
     # highlight target gene
     tg = agg[agg['genes'] == gene]
-    if tg.empty:
+    if gene is not None and tg.empty:
         print(f'> {gene} not measured for {compound}')
-    else:
+    elif not tg.empty:
         ax.scatter(tg['logfc'], tg['nlog10p'],
                    s=70, facecolor='none', edgecolor='black', lw=1.5, zorder=5)
         ax.annotate(gene,
@@ -2182,6 +2406,22 @@ def plot_volcano(df, compound, gene,
     ax.set_title(f'{compound}  ({len(agg):,} genes)' if title is None else title)
     ax.legend(loc='best', fontsize=8, frameon=False)
     plt.tight_layout()
+
+    # gene=None: label the top_n down genes, placed after the layout is final
+    if gene is None:
+        from adjustText import adjust_text
+        sig_down = sub.loc[(sub['significant'] == 1) & (sub['logfc'] < 0), 'genes'] if has_sig else agg['genes']
+        pool = agg[down & agg['genes'].isin(sig_down)].assign(score=lambda d: d['logfc'] * d['nlog10p'])
+        top = pool[pool['logfc'] >= xmin].nsmallest(top_n, 'score')
+        if (pool['logfc'] < xmin).any():
+            print(f'> {(pool["logfc"] < xmin).sum()} down gene(s) left of xmin={xmin} get no label: lower xmin to show them')
+        adjust_text([ax.text(x, y, g, fontsize=8) for g, x, y in zip(top['genes'], top['logfc'], top['nlog10p'])],
+                    x=agg['logfc'].to_numpy(), y=agg['nlog10p'].to_numpy(), ax=ax,
+                    arrowprops=dict(arrowstyle='-', lw=0.5, color='#555'))
+
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or '.', exist_ok=True)
+        ax.figure.savefig(save_path, dpi='figure', bbox_inches='tight')
     return agg
 
 
