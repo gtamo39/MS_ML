@@ -164,3 +164,4 @@ DFRAW_OVERWRITE: false
 FEATURES_TYPE: H237 # prevalence
 NON_SILENT_MODEL_NAME: Px_activity_non_silent_rf_H237
 SINGLELOW_MODEL_NAME: Px_activity_1_12_rf_H237 
+HIGH_MODEL_NAME: Px_activity_high_25    # ndown > 25 classifier (--save_high)

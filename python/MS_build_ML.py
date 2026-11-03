@@ -69,11 +69,12 @@ GENE_SCREEN_COLS = ['gene', 'R2', 'n', 'pearson_r', 'pearson_p', 'spearman_r', '
 CM2RM_PARTS = ('fbx_independent', 'control_compounds', 'contaminants')
 
 # Deployable activity classifiers as prototyped in MS_ActivityClass. RF, not the HGBC the older
-# 1-12 / not-high entries use — hence the _rf suffix on the registry names.
+# 1-12 / not-high entries use — hence the _rf suffix on the non-silent / 1-12 registry names.
 ACTIVITY_RF = {'n_estimators': 200, 'class_weight': 'balanced', 'n_jobs': 16, 'random_state': 0}
-# fallback registry names; config's NON_SILENT_MODEL_NAME / SINGLELOW_MODEL_NAME win when present
+# fallback registry names; config's *_MODEL_NAME keys win when present
 NON_SILENT_NAME = 'Px_activity_non_silent_rf'
 SINGLE_LOW_NAME = 'Px_activity_1_12_rf'
+HIGH_NAME = 'Px_activity_high_25'
 
 # ---------- state shared with the screen workers via fork() (copy-on-write, no pickling) ----------
 _SCREEN = {}
@@ -560,6 +561,8 @@ class OUTPUT():
         self.non_silent_model_id = None
         self.single_low_cv = None
         self.single_low_model_id = None
+        self.high_cv = None
+        self.high_model_id = None
 
     def save_non_silent_model(self, data, params, model=None, folds=5, name=None,
                               overwrite=False, comment=None):
@@ -598,6 +601,25 @@ class OUTPUT():
             data, params, label=data.MS['ndown'].between(1, 12),
             name=name or getattr(params, 'SINGLELOW_MODEL_NAME', SINGLE_LOW_NAME),
             task='activity_single_low_binary', positive='1 <= ndown <= 12',
+            model=model, folds=folds, overwrite=overwrite, comment=comment)
+
+    def save_high_model(self, data, params, model=None, folds=5, name=None,
+                        overwrite=False, comment=None):
+        """
+        -Train and register the deployable high-activity binary classifier:
+         label = ndown > 25, the High (>25) activity bin (see _save_activity_model for the rest).
+        param class data: DATA instance (MS, MF_features, serac_df)
+        param class params: PARAMS instance (registry, FEATURES_TYPE, HIGH_MODEL_NAME)
+        param model: sklearn classifier; None -> RandomForestClassifier(**ACTIVITY_RF)
+        param str name: MLTrail experiment_name; None -> config HIGH_MODEL_NAME
+        param bool overwrite: reset the latest version instead of appending one
+        param str comment: free-text note stored on this version (None -> field omitted)
+        return None: metrics land in self.high_cv, the id in self.high_model_id
+        """
+        self.high_cv, self.high_model_id = self._save_activity_model(
+            data, params, label=(data.MS['ndown'] > 25),
+            name=name or getattr(params, 'HIGH_MODEL_NAME', HIGH_NAME),
+            task='activity_high_binary', positive='ndown > 25',
             model=model, folds=folds, overwrite=overwrite, comment=comment)
 
     def _save_activity_model(self, data, params, label, name, task, positive, model=None,
@@ -759,6 +781,8 @@ if __name__ == "__main__":
                     help="train the non-silent (ndown > 0) classifier and register it in MLTrail")
     ap.add_argument('--save_single_low', action='store_true',
                     help="train the single/low (1 <= ndown <= 12) classifier and register it in MLTrail")
+    ap.add_argument('--save_high', action='store_true',
+                    help="train the high (ndown > 25) classifier and register it in MLTrail")
     ap.add_argument('--overwrite', action='store_true',
                     help="--save_*: reset the latest version in place instead of appending one")
     ap.add_argument('--comment', default=None,
@@ -797,3 +821,6 @@ if __name__ == "__main__":
 
     if args.save_single_low:
         output.save_single_low_model(data, params, overwrite=args.overwrite, comment=args.comment)
+
+    if args.save_high:
+        output.save_high_model(data, params, overwrite=args.overwrite, comment=args.comment)

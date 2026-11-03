@@ -50,7 +50,7 @@ data.load_proteomics_data(params); data.compute_features(params)
 output = OUTPUT()
 ```
 
-**Register the deployable activity classifiers in MLTrail** — both are `RandomForestClassifier(
+**Register the deployable activity classifiers in MLTrail** — all three are `RandomForestClassifier(
 n_estimators=200, class_weight='balanced')` on `MF_features`, differing only in the label: 5-fold CV
 for the `roc_auc` / `pr_auc` metrics, refit on the whole library, then the `{model, feature_cols}`
 bundle plus the `compound/smiles/label` training set go into the vault.
@@ -59,9 +59,10 @@ bundle plus the `compound/smiles/label` training set go into the vault.
 |---|---|---|
 | `--save_non_silent` | active: `ndown > 0` | `NON_SILENT_MODEL_NAME` |
 | `--save_single_low` | selective: `1 <= ndown <= 12` | `SINGLELOW_MODEL_NAME` |
+| `--save_high` | high: `ndown > 25` | `HIGH_MODEL_NAME` |
 
 ```bash
-python python/MS_build_ML.py --config config/config.yaml --save_non_silent --save_single_low
+python python/MS_build_ML.py --config config/config.yaml --save_non_silent --save_single_low --save_high
 python python/MS_build_ML.py --config config/config.yaml --save_non_silent --comment 'H237, cohort minus 2026-08-13'
 ```
 
@@ -71,11 +72,12 @@ version can record what changed. Omit it and MLTrail leaves the field out.
 ```python
 output.save_non_silent_model(data, params)                      # same thing from the notebook
 output.save_single_low_model(data, params)
+output.save_high_model(data, params)
 output.save_single_low_model(data, params, model=my_clf)        # try another estimator
 output.save_single_low_model(data, params, overwrite=True)      # CORRECT the latest version in place
 ```
 
-Both flags share one process on purpose — **never run two saves concurrently**: `Registry` reads the
+The flags share one process on purpose — **never run two saves concurrently**: `Registry` reads the
 whole vault JSON at construction and writes it back whole, so two handles racing on it collide on
 `next_id` and the last writer wins.
 
@@ -104,18 +106,19 @@ filename**: re-running into a file written under different settings keeps its ro
 mixes two datasets.
 
 **Every config key this module reads.** The first two define the cohort and apply at import, so they
-affect the screen and the classifiers alike; the last two only name the registry entries:
+affect the screen and the classifiers alike; the last three only name the registry entries:
 
 | key | effect |
 |---|---|
 | `EXCLUDE_DATES` | screen dates dropped from `df_raw` **and** `MS` (`DATA.drop_excluded_dates`) — in memory, the parquets keep them, so emptying the key restores them without a rebuild. The gene screen and the classifiers share one cohort |
 | `CM2RM_PARTS` | which blacklists build `cm2rm`: any subset of `contaminants` / `control_compounds` / `fbx_independent`. `--cm2rm a,b` overrides it |
-| `DROP_CM2RM` | `true` drops the `cm2rm` compounds from `df_raw` **and** `MS` at load (`DATA.drop_cm2rm`, after `drop_excluded_dates`) — in memory, the parquets keep them. Every downstream step inherits it, including `--save_non_silent` / `--save_single_low`. `false` keeps them in the frames |
+| `DROP_CM2RM` | `true` drops the `cm2rm` compounds from `df_raw` **and** `MS` at load (`DATA.drop_cm2rm`, after `drop_excluded_dates`) — in memory, the parquets keep them. Every downstream step inherits it, including `--save_non_silent` / `--save_single_low` / `--save_high`. `false` keeps them in the frames |
 | `DERIVE_MS` | `true` recomputes `MS` `ndown` / `activity` / `ms_score` from `df_raw` (`DATA.derive_ms`, after `drop_cm2rm`), so the two frames always describe the same rows. The delivered values stay as `ndown_src` / `activity_src`. In memory, the parquets keep the delivered schema. `false` keeps the old `MS` |
 | `PX_SOURCE` | where the FBX side comes from: `rds` reads the Px database (`RDS_*`) plus `PX_ARCHIVE_DIR`, dated by `PX_DATES`; `dropbox` reads the tranche folders under `FBX_DIR`. Both give one entry per export date, so nothing downstream changes |
 | `DROP_PLATE_SUBSTR` | plate-name substrings dropped from the FBX side, case-insensitive. Default `['MLN', 'KO', 'Eval']`; add `VM` / `BIND` to drop the validation conditions too |
 | `NON_SILENT_MODEL_NAME` | MLTrail `experiment_name` for the `ndown > 0` classifier (`--save_non_silent`) |
 | `SINGLELOW_MODEL_NAME` | MLTrail `experiment_name` for the `1 <= ndown <= 12` classifier (`--save_single_low`) |
+| `HIGH_MODEL_NAME` | MLTrail `experiment_name` for the `ndown > 25` classifier (`--save_high`) |
 
 ⚠ A model name is also its version key: the same name appends a version to that id, a new name
 starts a new id. There is no CLI flag for it — edit the key, pass a different `--config`, or use
