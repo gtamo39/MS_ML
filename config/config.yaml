@@ -87,7 +87,7 @@ BMS_GENES: data/patent/BMS_Pipeline_genes.csv
 OT_CACHE: output/MS/opentargets_target_disease.parquet
 MCS_CSV: output/MS/20260505_target_final_mcs.csv
 ML_MODEL_OUTPUT: output/ML/trained_models/20260617_select_genes # date should match that of last MS tranche
-HOT_TARGETS: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/1_Biology/Target first approach/Hot target review/High_value_targets_for_MGD_screening_reformated.xlsx
+HOT_TARGETS: data/hot_targets/20261105_hot_targets.csv   # genes_ori = name on the list, genes = df_raw symbol; was: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/1_Biology/Target first approach/Hot target review/High_value_targets_for_MGD_screening_reformated.xlsx
 
 # chemistry feature set: prevalence (H236 with Morgan bits >2% kept) | H236 (full universe)
 # | H237 (H236 + descriptastorus RDKit2D 'DS_*' descriptors; needs the descriptastorus pip pkg)
@@ -120,7 +120,7 @@ CONTROLS:
 # Any subset of: fbx_independent (serac_df Px_Ligase_dependent == 0 or Px_validated_WT == 0) |
 # control_compounds (CONTROLS above) | contaminants (the CONTAMINANTS csv). A `parts=` argument
 # to DATA.get_contaminants_and_controls, or --cm2rm on the CLI, overrides this.
-CM2RM_PARTS: [contaminants] # [contaminants, fbx_independent]
+CM2RM_PARTS: [contaminants, fbx_independent] # [contaminants]
 DROP_CM2RM: true              # drop cm2rm from df_raw AND MS at load (in memory; parquets keep them),
                               # so every downstream step inherits it — false keeps them in the frames
 
