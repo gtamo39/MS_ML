@@ -68,6 +68,11 @@ GENE_SCREEN_COLS = ['gene', 'R2', 'n', 'pearson_r', 'pearson_p', 'spearman_r', '
 # caller nor config CM2RM_PARTS names a subset.
 CM2RM_PARTS = ('fbx_independent', 'control_compounds', 'contaminants')
 
+# fallback CDD Vault fields of the library pull; config's CHEMLIB_COLUMNS wins when present
+CHEMLIB_COLUMNS = ['name', 'molecule_batch_identifier', 'smiles', 'Px_repetition(yes/no)', 'Px_validated_WT(yes/no)',
+                   'Px_Ligase_dependent(yes/no)', 'Px_NameLigase_dependent', 'Px_Target_info', 'Px_Target_interest',
+                   'Largest_Vector', 'Largest_Vector_Lenght', 'Lib ID', 'Lib Flavor']
+
 # Deployable activity classifiers as prototyped in MS_ActivityClass. RF, not the HGBC the older
 # 1-12 / not-high entries use — hence the _rf suffix on the non-silent / 1-12 registry names.
 ACTIVITY_RF = {'n_estimators': 200, 'class_weight': 'balanced', 'n_jobs': 16, 'random_state': 0}
@@ -221,27 +226,26 @@ class DATA():
 
     def load_chemical_lib_df(self, params):
         """
-        -Load the compound library (name + smiles + Px annotations + the Lib ID / Lib Flavor /
-         Largest_Vector batch fields). With CHEMLIB_OVERWRITE, pull the
-         latest straight from CDD Vault (collections AJ/AK) and cache to CHEMLIB_PATH; otherwise read
-         the cached csv. Coerce the yes/no annotation columns to 1/0/NaN.
+        -Load the compound library: the CHEMLIB_COLUMNS fields of CDD Vault (name + smiles + Px annotations +
+         batch fields such as Lib ID / Lib Flavor / Largest_Vector / Actual amount), one row per batch.
+         With CHEMLIB_OVERWRITE, pull them straight from CDD Vault (collections AJ/AK) and cache to
+         CHEMLIB_PATH. Then read the cached csv, so a fresh pull and a cached read give the same dtypes
+         (numbers as numbers, empty cells as NaN). Keep one row per compound: its last batch (highest
+         molecule_batch_identifier, e.g. -002 over -001), in the csv row order; the csv keeps every batch.
+         Coerce the yes/no annotation columns to 1/0/NaN.
         -Derive the validated / devalidated target lists from Px_Ligase_dependent + Px_Target_interest.
-        param class params: PARAMS instance (CHEMLIB_OVERWRITE, CHEMLIB_PATH)
+        param class params: PARAMS instance (CHEMLIB_OVERWRITE, CHEMLIB_PATH, CHEMLIB_COLUMNS)
         return None:
         """
         if params.CHEMLIB_OVERWRITE:
-            self.serac_df = (get_df(vault=7108, collections=['AK', 'AJ'],
-                                    columns=['name', 'Batch Mol-Batch ID', 'smiles', 'Px_repetition(yes/no)',
-                                             'Px_validated_WT(yes/no)', 'Px_Ligase_dependent(yes/no)',
-                                             'Px_NameLigase_dependent', 'Px_Target_info', 'Px_Target_interest',
-                                             'Largest_Vector', 'Largest_Vector_Lenght',
-                                             'Lib ID', 'Lib Flavor'])
-                             .rename(columns={'name': 'compound'}))
-            self.serac_df.to_csv(params.CHEMLIB_PATH, sep=',', index=False)
-        else:
-            self.serac_df = pd.read_csv(params.CHEMLIB_PATH)
+            (get_df(vault=7108, collections=['AK', 'AJ'], columns=getattr(params, 'CHEMLIB_COLUMNS', CHEMLIB_COLUMNS))
+             .rename(columns={'name': 'compound'})
+             .to_csv(params.CHEMLIB_PATH, sep=',', index=False))
+        self.serac_df = pd.read_csv(params.CHEMLIB_PATH)
 
-        self.serac_df = self.serac_df.drop_duplicates()
+        # one row per compound: its last batch (highest molecule_batch_identifier, e.g. -002 over -001)
+        self.serac_df = (self.serac_df.sort_values('molecule_batch_identifier', kind='stable')
+                         .drop_duplicates('compound', keep='last').sort_index())
         for _c in ['Px_validated_WT(yes/no)', 'Px_Ligase_dependent(yes/no)', 'Px_repetition(yes/no)']:   # 'yes'/'no'/'' -> 1/0/NaN
             self.serac_df[_c] = self.serac_df[_c].astype('string').str.strip().str.lower().map({'yes': 1, 'no': 0})
 

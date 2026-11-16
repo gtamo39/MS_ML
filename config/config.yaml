@@ -87,7 +87,7 @@ BMS_GENES: data/patent/BMS_Pipeline_genes.csv
 OT_CACHE: output/MS/opentargets_target_disease.parquet
 MCS_CSV: output/MS/20260505_target_final_mcs.csv
 ML_MODEL_OUTPUT: output/ML/trained_models/20260617_select_genes # date should match that of last MS tranche
-HOT_TARGETS: data/hot_targets/20261105_hot_targets.csv   # genes_ori = name on the list, genes = df_raw symbol; was: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/1_Biology/Target first approach/Hot target review/High_value_targets_for_MGD_screening_reformated.xlsx
+HOT_TARGETS: /home/gtamo/MS_ML/data/hot_targets/20261105_hot_targets.csv   # genes_ori = name on the list, genes = df_raw symbol; was: /mnt/c/Users/gtamo/Serac Biosciences Dropbox/Serac_team/1_Biology/Target first approach/Hot target review/High_value_targets_for_MGD_screening_reformated.xlsx
 
 # chemistry feature set: prevalence (H236 with Morgan bits >2% kept) | H236 (full universe)
 # | H237 (H236 + descriptastorus RDKit2D 'DS_*' descriptors; needs the descriptastorus pip pkg)
@@ -96,6 +96,23 @@ PHARMA_R2_CUTOFF: 0.08
 MUSIC_SET: output/enumeration/20260429/sdf/20260429_Music_1K.sdf
 FLAVOR_LIB: output/enumeration/202605_FlavorLib/202605_flavorlib.csv
 CHEMLIB_PATH: data/chemical_libs/SERAC_lib.csv
+# CDD Vault fields pulled into CHEMLIB_PATH when CHEMLIB_OVERWRITE is true ('name' becomes 'compound').
+# The code needs name, molecule_batch_identifier, smiles, the 3 Px_*(yes/no) fields and Px_Target_interest.
+CHEMLIB_COLUMNS:
+- name
+- molecule_batch_identifier
+- smiles
+- Px_repetition(yes/no)
+- Px_validated_WT(yes/no)
+- Px_Ligase_dependent(yes/no)
+- Px_NameLigase_dependent
+- Px_Target_info
+- Px_Target_interest
+- Largest_Vector
+- Largest_Vector_Lenght
+- Lib ID
+- Lib Flavor
+- Actual amount
 SRB_PNG_DIR: data/srb_png            # one <compound>.png structure per SRB id (fn.plot_volcano_pareto)
 DFRAW_PATH: output/MS/df_raw.parquet
 MS_PATH: output/MS/MS.parquet
@@ -157,7 +174,7 @@ STANDOUT_REPORT_DBX: predictions/standout_reports/   # appended to DROPBOX_ML
 STANDOUT_REPORT_LOC: output/MS/standout_reports      # local copy before the push
 STANDOUT_REPORT_MAX: 10     # volcanoes DRAWN per report, top d_any first (0 = all); the table lists every row
 
-CHEMLIB_OVERWRITE: false
+CHEMLIB_OVERWRITE: true
 DFRAW_OVERWRITE: false
 
 # Saved MLTrail models:

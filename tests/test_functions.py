@@ -974,6 +974,34 @@ class TestSmoke(unittest.TestCase):
             self.assertTrue(out.exists())
         plt.close('all')
 
+    def test_plot_volcano_significant_labels_top_down_genes(self):
+        """gene=None with top_n=10 labels the ten highest-scoring significant down genes.
+
+        Same 12 significant-down genes as the plot_volcano test, keyed on the compound:
+        D02..D11 must carry a label and nothing else, and the y axis starts at 0.
+        """
+        fig, ax = plt.subplots()
+        fn.plot_volcano_significant(_volcano_genes(), 'C1', None, key='compound', top_n=10, ax=ax)
+        # exactly the ten highest-scoring down genes carry a label
+        self.assertEqual(sorted(t.get_text() for t in ax.texts if t.get_text()),
+                         [f'D{i:02d}' for i in range(2, 12)])
+        # -log10 p is never negative, so the axis starts at 0
+        self.assertEqual(ax.get_ylim()[0], 0)
+        plt.close(fig)
+
+    def test_plot_volcano_significant_no_label_by_default_or_silent(self):
+        """The default top_n=0 labels nothing, and a Silent volcano labels nothing even with top_n=10.
+
+        The default keeps the old behaviour for the existing callers; on a Silent volcano no row
+        is significant, so there is no down gene to label.
+        """
+        for df, kw in [(_volcano_genes(), {}), (_volcano_genes().assign(significant=0.0), {'top_n': 10})]:
+            fig, ax = plt.subplots()
+            fn.plot_volcano_significant(df, 'C1', None, key='compound', ax=ax, **kw)
+            # no gene label on the axes
+            self.assertFalse([t for t in ax.texts if t.get_text()])
+            plt.close(fig)
+
     def test_plot_autoresearch_progress_smoke(self):
         """Progress plot reads the sample JSONL log and returns (fig, ax)."""
         fig, ax = fn.plot_autoresearch_progress(DATA / 'sample_autoresearch.jsonl',

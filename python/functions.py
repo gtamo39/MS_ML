@@ -3207,7 +3207,7 @@ def plot_volcano_significant(df, uniquecontrast, gene,
                              up_color='#008bfb', down_color='#ff0051',
                              ns_color='lightgrey',
                              gene_category=None, category_colors=None,
-                             ax=None, title=None):
+                             ax=None, title=None, top_n=0):
     """
     Volcano for a single experiment (``uniquecontrast``), colouring ONLY the
     targets flagged *significant* — up (logfc > 0) in ``up_color``, down
@@ -3243,6 +3243,9 @@ def plot_volcano_significant(df, uniquecontrast, gene,
         ``CATEGORY_COLORS``); only used when ``gene_category`` is given.
     :param Axes ax: draw into an existing Axes; new figure if ``None``.
     :param str title: ``None`` -> default caption; ``''`` -> no title; else verbatim.
+    :param int top_n: with ``gene=None``, label the ``top_n`` significant down genes, the
+        highest ``-logfc * -log10 p`` first (adjustText), as :func:`plot_volcano` does. A volcano
+        with no significant down gene gets no label. ``0`` -> no labels.
     :return df: per-gene aggregate (``genes``, ``logfc``, ``pvalue``,
         ``nlog10p``, ``significant``).
     """
@@ -3333,6 +3336,7 @@ def plot_volcano_significant(df, uniquecontrast, gene,
                         arrowprops=dict(arrowstyle='-', lw=0.7))
 
     ax.set_xlim(xmin, xmax)
+    ax.set_ylim(bottom=0)
     ax.set_xlabel('logfc')
     ax.set_ylabel('-log10(p-value)')
     if title is None:
@@ -3345,6 +3349,17 @@ def plot_volcano_significant(df, uniquecontrast, gene,
     else:
         ax.legend(loc='best', fontsize=8, frameon=False)
     plt.tight_layout()
+
+    # gene=None: label the top_n significant down genes, the highest -logfc * -log10 p first
+    if gene is None and top_n:
+        from adjustText import adjust_text
+        pool = agg[down].assign(score=lambda d: d['logfc'] * d['nlog10p'])
+        top = pool[pool['logfc'] >= xmin].nsmallest(top_n, 'score')
+        if (pool['logfc'] < xmin).any():
+            print(f'> {(pool["logfc"] < xmin).sum()} down gene(s) left of xmin={xmin} get no label: lower xmin to show them')
+        adjust_text([ax.text(x, y, g, fontsize=8) for g, x, y in zip(top['genes'], top['logfc'], top['nlog10p'])],
+                    x=agg['logfc'].to_numpy(), y=agg['nlog10p'].to_numpy(), ax=ax,
+                    arrowprops=dict(arrowstyle='-', lw=0.5, color='#555'))
     return agg
 
 
