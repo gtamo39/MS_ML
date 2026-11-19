@@ -5,9 +5,9 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _REPO_ROOT)
 os.chdir(_REPO_ROOT)
 sys.path.insert(0, os.path.join(os.path.dirname(_REPO_ROOT), 'Scripts'))  # shared helpers (Rdkit_tools, ML_Class, ...)
-sys.path.insert(0, os.path.expanduser('~/CDD_Vault_API/python'))          # CDD Vault API (get_df)
+sys.path.insert(0, os.path.expanduser('~/CDD_Vault_API/python'))          # CDD Vault API helpers (fn.cdd_vault_df, fn.cdd_px_sources)
 
-import re, gc, csv, json, time, pickle, importlib, argparse, warnings
+import gc, csv, json, time, pickle, importlib, argparse, warnings
 import multiprocessing as mp
 import numpy as np
 import pandas as pd
@@ -31,7 +31,6 @@ import Rdkit_tools as rdkit_tools
 import ML_Reg as ML_Reg
 import ML_Class as ML_Class
 import Statistics_tools as stats_tools
-from get_library import get_df   # CDD Vault collection export
 from mltrail import Registry     # model registry (add / predict / trail)
 
 
@@ -68,10 +67,11 @@ GENE_SCREEN_COLS = ['gene', 'R2', 'n', 'pearson_r', 'pearson_p', 'spearman_r', '
 # caller nor config CM2RM_PARTS names a subset.
 CM2RM_PARTS = ('fbx_independent', 'control_compounds', 'contaminants')
 
-# fallback CDD Vault fields of the library pull; config's CHEMLIB_COLUMNS wins when present
+# fallback CDD Vault fields and collections of the library pull; config's CHEMLIB_COLUMNS / CHEMLIB_COLLECTIONS win
 CHEMLIB_COLUMNS = ['name', 'molecule_batch_identifier', 'smiles', 'Px_repetition(yes/no)', 'Px_validated_WT(yes/no)',
                    'Px_Ligase_dependent(yes/no)', 'Px_NameLigase_dependent', 'Px_Target_info', 'Px_Target_interest',
                    'Largest_Vector', 'Largest_Vector_Lenght', 'Lib ID', 'Lib Flavor']
+CHEMLIB_COLLECTIONS = ['AJ', 'AK']
 
 # Deployable activity classifiers as prototyped in MS_ActivityClass. RF, not the HGBC the older
 # 1-12 / not-high entries use — hence the _rf suffix on the non-silent / 1-12 registry names.
@@ -221,6 +221,7 @@ class DATA():
         self.cm2rm = None
         self.validated_targets = None
         self.devalidated_targets = None
+        self.validated_cmp = None
         self.ot_df = None
         self.ot_pharma = None
 
@@ -228,20 +229,53 @@ class DATA():
         """
         -Load the compound library: the CHEMLIB_COLUMNS fields of CDD Vault (name + smiles + Px annotations +
          batch fields such as Lib ID / Lib Flavor / Largest_Vector / Actual amount), one row per batch.
-         With CHEMLIB_OVERWRITE, pull them straight from CDD Vault (collections AJ/AK) and cache to
-         CHEMLIB_PATH. Then read the cached csv, so a fresh pull and a cached read give the same dtypes
-         (numbers as numbers, empty cells as NaN). Keep one row per compound: its last batch (highest
-         molecule_batch_identifier, e.g. -002 over -001), in the csv row order; the csv keeps every batch.
-         Coerce the yes/no annotation columns to 1/0/NaN.
+         With CHEMLIB_OVERWRITE, pull EVERY molecule of the vault in one walk (fn.cdd_vault_df, ~20K) and
+         cache it to CHEMLIB_PATH, in the CHEMLIB_COLUMNS order plus Collections (the molecule's collection
+         names joined by ';', as in the CDD web export) and Subseries. Then read the cached csv, so a fresh
+         pull and a cached read give the same dtypes (numbers as numbers, empty cells as NaN), and keep the
+         library: the molecules of a CHEMLIB_COLLECTIONS collection or of a CHEMLIB_SUBSERIES subseries. A
+         change of these two keys needs no new pull. A cache without Collections (pulled before 2026-11-19)
+         stays whole, with a note. Keep one
+         row per compound: its last batch (highest molecule_batch_identifier, e.g. -002 over -001), in the
+         csv row order; the csv keeps every batch. Coerce the yes/no annotation columns to 1/0/NaN.
+        -Px_Source in CHEMLIB_COLUMNS is not a CDD field: it is every proteomics source of the compound in
+         the CDD protocol CDD_PX_PROTOCOL, over all its batches (fn.cdd_px_sources, upper-cased, joined by
+         '+', e.g. BMS+SERAC; NaN = never screened). Nothing drops here: EXCLUDE_SOURCES acts in
+         load_proteomics_data.
         -Derive the validated / devalidated target lists from Px_Ligase_dependent + Px_Target_interest.
-        param class params: PARAMS instance (CHEMLIB_OVERWRITE, CHEMLIB_PATH, CHEMLIB_COLUMNS)
+         When VALIDATED_TARGET_FILE names the curated glue list (a csv with the columns genes and
+         Batch Molecule-Batch ID, one row per validated gene and compound batch; fn.read_validated_cmp),
+         its genes replace the validated list, as in Px_interface, and its rows become validated_cmp,
+         with compound = the molecule id. Empty keeps the CDD-derived list and leaves validated_cmp None.
+        param class params: PARAMS instance (CHEMLIB_OVERWRITE, CHEMLIB_PATH, CHEMLIB_COLUMNS, CHEMLIB_COLLECTIONS, CHEMLIB_SUBSERIES, CDD_PX_PROTOCOL, VALIDATED_TARGET_FILE)
         return None:
         """
         if params.CHEMLIB_OVERWRITE:
-            (get_df(vault=7108, collections=['AK', 'AJ'], columns=getattr(params, 'CHEMLIB_COLUMNS', CHEMLIB_COLUMNS))
-             .rename(columns={'name': 'compound'})
-             .to_csv(params.CHEMLIB_PATH, sep=',', index=False))
+            # the whole vault, with the two fields of the library filter below (fn.cdd_vault_df names Collections 'collection')
+            cols = list(getattr(params, 'CHEMLIB_COLUMNS', CHEMLIB_COLUMNS))
+            cols += [c for c in ('Collections', 'Subseries') if c not in cols]
+            lib = (fn.cdd_vault_df([{'Collections': 'collection'}.get(c, c) for c in cols if c != 'Px_Source'])
+                   .rename(columns={'name': 'compound', 'collection': 'Collections'}))
+            # Px_Source, when listed: every proteomics source of the compound in CDD, over all its batches
+            if 'Px_Source' in cols:
+                src = fn.cdd_px_sources(params.CDD_PX_PROTOCOL)
+                src = src.groupby(src['molecule_batch_identifier'].str.extract(r'^(\w+-\d+)', expand=False))['source'].agg(fn.join_sources)
+                print(f'> Px_Source from CDD protocol {params.CDD_PX_PROTOCOL}: {src.value_counts().to_dict()} compounds')
+                lib['Px_Source'] = lib['compound'].map(src)
+            lib[[{'name': 'compound'}.get(c, c) for c in cols]].to_csv(params.CHEMLIB_PATH, sep=',', index=False)
         self.serac_df = pd.read_csv(params.CHEMLIB_PATH)
+
+        # the library: molecules of a CHEMLIB_COLLECTIONS collection or of a CHEMLIB_SUBSERIES subseries
+        _colls = list(getattr(params, 'CHEMLIB_COLLECTIONS', CHEMLIB_COLLECTIONS))
+        _subs  = list(getattr(params, 'CHEMLIB_SUBSERIES', None) or [])
+        if 'Collections' in self.serac_df.columns:
+            _in = self.serac_df['Collections'].fillna('').str.split(';').explode().isin(_colls).groupby(level=0).any()
+            _keep = _in | self.serac_df['Subseries'].isin(_subs)
+            print(f'> library = collections {_colls} or subseries {_subs}: {self.serac_df.loc[_keep, "compound"].nunique():,} of '
+                  f'{self.serac_df["compound"].nunique():,} vault compounds')
+            self.serac_df = self.serac_df[_keep]
+        else:
+            print('> [note] the cached library has no Collections column (old pull): kept whole; pull once with CHEMLIB_OVERWRITE: true')
 
         # one row per compound: its last batch (highest molecule_batch_identifier, e.g. -002 over -001)
         self.serac_df = (self.serac_df.sort_values('molecule_batch_identifier', kind='stable')
@@ -254,6 +288,14 @@ class DATA():
         _dep = {v: self.serac_df[(self.serac_df['Px_Ligase_dependent(yes/no)'] == v) & _has_tgt] for v in (0, 1)}
         self.devalidated_targets = list({s.split(' ')[0].upper() for x in _dep[0]['Px_Target_interest'] for s in x.split(';')})
         self.validated_targets   = list({s.split(' ')[0].upper() for x in _dep[1]['Px_Target_interest'] for s in x.split(';')})
+
+        # optional override, as in Px_interface: the curated glue list, one row per validated gene and compound batch
+        _vtf = str(getattr(params, 'VALIDATED_TARGET_FILE', None) or '').strip()
+        if _vtf:
+            self.validated_cmp = fn.read_validated_cmp(_vtf)
+            self.validated_targets = sorted(self.validated_cmp['genes'].unique())
+            print(f'> validated_targets overridden from {_vtf}: {len(self.validated_targets)} genes '
+                  f'on {self.validated_cmp["compound"].nunique()} compounds')
 
         print(f'> Chemical lib dim: {self.serac_df.shape} | '
               f'{len(self.validated_targets)} validated / {len(self.devalidated_targets)} devalidated targets')
@@ -288,19 +330,33 @@ class DATA():
          DFRAW_PATH / MS_PATH. Otherwise read the cached parquets.
         -PX_SOURCE picks where the FBX side comes from: 'rds' reads the Px database plus
          PX_ARCHIVE_DIR (fn.load_fbx_rds), 'dropbox' reads the tranche folders under FBX_DIR.
-         Both give one entry per export date, so everything after the read is the same.
+         Both give one entry per export date, so everything after the read is the same. With 'rds'
+         and PX_DATES_FROM_CDD, a database experiment that PX_DATES does not date takes the CDD
+         batch date of its (batch, plate) pair (fn.fbx_dates), so it is no longer skipped.
+        -Every experiment gets a source (upper-cased CDD Source: SERAC / BMS / EVOTEC), and the config
+         EXCLUDE_SOURCES go before any per-compound collapse, so a compound keeps its latest screen
+         from a source that stays. The three old tranches take it from their own metadata Source
+         (fn.load_proteomics_data); the FBX side from the CDD protocol CDD_PX_PROTOCOL, by batch and
+         plate (fn.tag_fbx_sources). df_raw and MS keep a source column. A change of EXCLUDE_SOURCES
+         needs a rebuild; a cached load only says when the cache does not match it.
         -Either way, config EXCLUDE_DATES tranches and then the cm2rm compounds are dropped from
          df_raw AND MS (see drop_excluded_dates / drop_cm2rm) — in memory, never from the cache.
          So build cm2rm first: call get_contaminants_and_controls before this.
         -Last, derive_ms recomputes MS ndown / activity / ms_score from the filtered df_raw. The
          cache keeps the delivered values, so the parquets need no rebuild for this.
-        param class params: PARAMS instance (DFRAW_OVERWRITE, RAW_/CLEAN_PROTEOMICS_PATH, PX_*, PX_SOURCE, RDS_*, FBX_DIR, DROP_PLATE_SUBSTR, MS_PATH, DFRAW_PATH, EXCLUDE_DATES, DROP_CM2RM, DERIVE_MS)
+        param class params: PARAMS instance (DFRAW_OVERWRITE, RAW_/CLEAN_PROTEOMICS_PATH, PX_*, PX_SOURCE, PX_DATES_FROM_CDD, RDS_*, FBX_DIR, DROP_PLATE_SUBSTR, EXCLUDE_SOURCES, CDD_PX_PROTOCOL, MS_PATH, DFRAW_PATH, EXCLUDE_DATES, DROP_CM2RM, DERIVE_MS)
         return None:
         """
+        excl = [s.upper() for s in (getattr(params, 'EXCLUDE_SOURCES', ['BMS']) or [])]
         if not params.DFRAW_OVERWRITE:
             self.MS     = pd.read_parquet(params.MS_PATH)
             self.df_raw = pd.read_parquet(params.DFRAW_PATH)
             print(f'> loaded cached MS {self.MS.shape} | df_raw {self.df_raw.shape}')
+            # EXCLUDE_SOURCES acts on a rebuild only: say when the cache does not match it
+            if 'source' not in self.MS.columns:
+                print('> [note] the cache has no source column: rebuild one time with DFRAW_OVERWRITE: true')
+            elif set(self.MS['source'].dropna()) & set(excl):
+                print(f'> [warn] the cache holds a source of EXCLUDE_SOURCES {excl}: rebuild with DFRAW_OVERWRITE: true')
             self.drop_excluded_dates(params)
             self.drop_cm2rm(params)
             self.derive_ms(params)
@@ -313,20 +369,23 @@ class DATA():
             params.RAW_PROTEOMICS_PATH,
             params.CLEAN_PROTEOMICS_PATH,
             drop_plates=['Plate12', 'Plate15', 'Plate23'],
+            exclude_sources=excl,                      # EXCLUDE_SOURCES, on the metadata Source
         )
         df_raw_20260520, MS20260520 = fn.load_proteomics_data(
             params.dbx(params.PX_20260520_DB),         # raw per-gene table (Database export)
             params.dbx(params.PX_20260520_CDDVAULT),   # metadata table (Vault export: SMILES, Collections)
             drop_plates=['Plate12', 'Plate15', 'Plate23'],
             mode='cddvault',                           # Collections recipe (drops PROTACs), join on 'Batch Molecule-Batch ID'
-            collections=['AJ', 'AK'],
+            collections=getattr(params, 'CHEMLIB_COLLECTIONS', CHEMLIB_COLLECTIONS),
+            exclude_sources=excl,
         )
         df_raw_20260529, MS20260529 = fn.load_proteomics_data(
             params.dbx(params.PX_20260529_DB),
             params.dbx(params.PX_20260529_CDDVAULT),
             drop_plates=['Plate12', 'Plate15', 'Plate23'],
             mode='cddvault',
-            collections=['AJ', 'AK'],
+            collections=getattr(params, 'CHEMLIB_COLLECTIONS', CHEMLIB_COLLECTIONS),
+            exclude_sources=excl,
         )
         # manual formatting for the 20260529 metadata (different export header)
         MS20260529 = MS20260529.rename(columns={
@@ -348,7 +407,7 @@ class DATA():
 
         ## MS — per-compound activity / ndown
         _cols = ['Molecule Name', 'MSData - Proteomics activities: Nr. Down', 'origin',
-                 'MSData - Proteomics activities: Cmpd Activity']
+                 'MSData - Proteomics activities: Cmpd Activity', 'source']
         self.MS = (pd.concat([MS20260429.assign(origin='MS20260429'),
                               MS20260520.assign(origin='MS20260520'),
                               MS20260529.assign(origin='MS20260529')]).reset_index(drop=True)[_cols]
@@ -361,12 +420,16 @@ class DATA():
         # -------------------
         # New (FBX) data
         # -------------------
+        # CDD proteomics rows: the source of each FBX experiment, and the date of one that PX_DATES lacks
+        _src = fn.cdd_px_sources(params.CDD_PX_PROTOCOL)
+
         # PX_SOURCE picks the FBX side: the Px database, or the tranche folders under FBX_DIR
         _plates = tuple(getattr(params, 'DROP_PLATE_SUBSTR', None) or ('MLN', 'KO', 'Eval'))
         if getattr(params, 'PX_SOURCE', 'dropbox') == 'rds':
             _fbx = fn.load_fbx_rds(params.RDS_HOST, database=params.RDS_DATABASE,
                                    cred_file=params.RDS_CRED_FILE, ca_bundle=params.RDS_CA_BUNDLE,
                                    px_dates=params.PX_DATES, archive_dir=params.PX_ARCHIVE_DIR,
+                                   cdd_dates=_src if getattr(params, 'PX_DATES_FROM_CDD', True) else None,
                                    control_compounds=self.control_compounds,
                                    contaminants=self.contaminants, drop_plate_substr=_plates)
         else:
@@ -378,16 +441,19 @@ class DATA():
                                                              opener=params.dbx, lister=params.dbx_glob)
                     for t in TRANCHES}
 
+        # source of each FBX experiment from CDD; EXCLUDE_SOURCES go per tranche, before any collapse
+        _fbx = {k: fn.tag_fbx_sources(d, m, _src, exclude=excl) for k, (d, m) in _fbx.items()}
+
         # stack tranches; on a recurring experiment (uniquecontrast) / compound, keep the LATEST export
         df_raw_fbx = (pd.concat([d.assign(_tranche=k) for k, (d, _) in _fbx.items()], ignore_index=True)
                       .sort_values('_tranche').drop_duplicates(['uniquecontrast', 'pg'], keep='last'))  # row key is (contrast, protein); deduping on contrast alone collapsed the proteome
         # stamp each FBX row with its tranche date (folder YYYYMMDD) — FBX_DFRAW_COLS carries no 'date',
         # so without this keep_latest_batch_per_compound sees NaT and drops every FBX row (NaT==NaT is False).
         df_raw_fbx['date'] = pd.to_datetime(df_raw_fbx['_tranche'].str[:8], format='%Y%m%d')
-        df_raw_fbx = df_raw_fbx[fn.FBX_DFRAW_COLS + ['date']].reset_index(drop=True)
+        df_raw_fbx = df_raw_fbx[fn.FBX_DFRAW_COLS + ['date', 'source']].reset_index(drop=True)
         MS_fbx = (pd.concat([m for _, m in _fbx.values()], ignore_index=True)
                   .sort_values('date').drop_duplicates('compound', keep='last')
-                  [fn.FBX_MS_COLS].reset_index(drop=True))
+                  [fn.FBX_MS_COLS + ['source']].reset_index(drop=True))
 
         # align to the LIVE df_raw / MS schemas so a plain concat works regardless of any extra
         # columns the in-memory frames carry (e.g. smiles); columns FBX can't fill become NaN.
@@ -413,6 +479,9 @@ class DATA():
         self.MS = self.MS[~self.MS['compound'].isin(self.control_compounds + self.contaminants)]
         self.MS     = self.MS[self.MS['compound'].isin(self.serac_df['compound'])]
         self.df_raw = self.df_raw[self.df_raw['compound'].isin(self.serac_df['compound'])]
+        self.df_raw['source'] = self.df_raw['source'].astype('category')   # a few values on ~60M rows
+        print(f'> sources: MS {self.MS["source"].value_counts(dropna=False).to_dict()} compounds '
+              f'| excluded: {excl}')
 
         self.MS.to_parquet(params.MS_PATH, index=False)
         self.df_raw.to_parquet(params.DFRAW_PATH, index=False)

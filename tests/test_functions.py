@@ -130,18 +130,22 @@ class TestMSCollapse(unittest.TestCase):
 class TestLoadProteomics(unittest.TestCase):
 
     def test_serac_mode_dedups_filters_and_joins(self):
-        """serac recipe: drop non-SERAC rows, keep the latest-dated row per
-        Molecule Name, drop noisy plates, and keep only molecule-batches present
-        in the metadata. SRB-0388 (VENDOR) is dropped from MS; SRB-0386 survives
-        MS but its only raw rows are on Plate12 (dropped); SRB-0385 keeps its
-        2026-04-29 row over the 2026-04-01 one."""
+        """serac recipe: drop the exclude_sources rows (compared upper-case), keep
+        the latest-dated row per Molecule Name, drop noisy plates, and keep only
+        molecule-batches present in the metadata. SRB-0388 (VENDOR, excluded as
+        'vendor') is dropped from MS; SRB-0386 survives MS but its only raw rows
+        are on Plate12 (dropped); SRB-0385 keeps its 2026-04-29 row over the
+        2026-04-01 one. Both frames carry the source."""
         df_raw, MS = fn.load_proteomics_data(
             str(DATA / 'sample_px_raw_serac.csv'),
             str(DATA / 'sample_px_meta_serac.csv'),
-            verbose=False)
-        # non-SERAC compound filtered out of the metadata
+            exclude_sources=['vendor'], verbose=False)
+        # the excluded compound is filtered out of the metadata
         self.assertEqual(set(MS['Molecule Name']),
                          {'SRB-0000385', 'SRB-0000386', 'SRB-0000387'})
+        # the metadata Source becomes source, upper-cased, on MS and on the raw rows of its batch
+        self.assertEqual(set(MS['source']), {'SERAC'})
+        self.assertEqual(set(df_raw['source']), {'SERAC'})
         # one row per compound after the latest-date dedup
         self.assertEqual(len(MS), 3)
         # SRB-0385 keeps its latest screen date
@@ -152,6 +156,20 @@ class TestLoadProteomics(unittest.TestCase):
         self.assertEqual(set(df_raw['compound']), {'SRB-0000385', 'SRB-0000387'})
         # MoleculeBatchID split into compound + batch
         self.assertEqual(set(df_raw['batch']), {'001'})
+
+    def test_default_excludes_bms_only(self):
+        """The default exclude_sources is ('BMS',), not the old 'SERAC only' rule:
+        a source that is not excluded (here VENDOR, as EVOTEC in the real data)
+        stays in MS and in df_raw, with its own source."""
+        df_raw, MS = fn.load_proteomics_data(
+            str(DATA / 'sample_px_raw_serac.csv'),
+            str(DATA / 'sample_px_meta_serac.csv'),
+            verbose=False)
+        # SRB-0388 (VENDOR) stays in the metadata
+        self.assertIn('SRB-0000388', set(MS['Molecule Name']))
+        # its raw rows stay too, tagged with its source
+        self.assertEqual(df_raw.groupby('compound')['source'].first().to_dict(),
+                         {'SRB-0000385': 'SERAC', 'SRB-0000387': 'SERAC', 'SRB-0000388': 'VENDOR'})
 
     def test_cddvault_mode_renames_and_filters(self):
         """cddvault recipe: rename SMILES->smiles + raw 'unique'->'uniquecontrast',
@@ -170,6 +188,9 @@ class TestLoadProteomics(unittest.TestCase):
         self.assertNotIn('unique', df_raw.columns)
         # only 0390 survives (0391 dropped by Plate15, 0392 not in metadata)
         self.assertEqual(set(df_raw['compound']), {'SRB-0000390'})
+        # the unprefixed 'Source' ('Serac', as in the 20260529 export) is read and upper-cased
+        self.assertEqual(set(MS['source']), {'SERAC'})
+        self.assertEqual(set(df_raw['source']), {'SERAC'})
 
     def test_bad_mode_raises(self):
         """An unknown mode raises ValueError rather than silently mis-loading."""
@@ -336,6 +357,70 @@ class TestLoadFbxRds(unittest.TestCase):
         # SRB-0000003 is a control, so uc3 is gone and only the archived uc4 is left
         self.assertEqual(set(dfx30['compound']), {'SRB-0000004'})
 
+    def test_cdd_dates_fill_undated(self):
+        """With cdd_dates, an experiment that PX_DATES does not date takes the CDD batch date of its
+        (batch, plate) pair and lands in that day's tranche. A glues contrast matches by the plate in
+        its name, because the real glues tables ship no plate. A dated experiment keeps its PX_DATES day."""
+        tables, uc7 = _rds_tables(), 'SRB7_vs_DMSO_complement_Pw77'
+        tables['px_fbx_glues'] = pd.concat([tables['px_fbx_glues'], pd.DataFrame([dict(
+            id=8, pg='P7', genes='GGG', uniquecontrast=uc7, logfc=-1.2, pvalue=1e-5, adjpval=0.01, significant=1)])],
+            ignore_index=True).drop(columns='plate')
+        tables['px_fbx_glues_report'] = pd.concat([tables['px_fbx_glues_report'], pd.DataFrame([dict(
+            id=8, uniquecontrast=uc7, srbnumber='SRB-0000007-001', nr_down=3, activity='Low (2-10)')])],
+            ignore_index=True).drop(columns='plate')
+        cdd = pd.DataFrame([('SRB-0000008-001', 'Pw08', '2026-08-18'), ('SRB-0000007-001', 'Pw77', '2026-08-18'),
+                            ('SRB-0000001-001', 'Pw01', '2026-05-01')], columns=['molecule_batch_identifier', 'plate', 'date'])
+        cdd['date'] = pd.to_datetime(cdd['date'])
+        with unittest.mock.patch.object(fn, 'rds_table', lambda table, **_: tables[table].copy()):
+            out = fn.load_fbx_rds('fake-host', px_dates=str(self.root / 'PX_dates.csv'), archive_dir=str(self.root),
+                                  cdd_dates=cdd, verbose=False)
+        # uc8 (no PX_DATES date) and the glues contrast form the new 2026-08-18 tranche
+        self.assertEqual(sorted(out), ['20260616', '20260630', '20260818'])
+        dfx, msx = out['20260818']
+        self.assertEqual(set(dfx['uniquecontrast']), {'uc8', uc7})
+        self.assertTrue((msx['origin'] == 'MS20260818').all())
+        # uc1 keeps its PX_DATES day, although CDD lists another day for its pair
+        self.assertIn('uc1', set(out['20260616'][0]['uniquecontrast']))
+
+
+class TestFbxDates(unittest.TestCase):
+    """fn.fbx_dates — the PX_DATES day of an FBX experiment, else the CDD batch date of its (batch, plate) pair."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.px = Path(self.tmp.name) / 'PX_dates.csv'
+        pd.DataFrame([dict(uniquecontrast='uc1', date='2026-06-16', source='FBX'),
+                      dict(uniquecontrast='uc2', date=None, source='FBX'),
+                      dict(uniquecontrast='uc9', date='2026-04-29', source='df_raw')]).to_csv(self.px, index=False)
+        self.cdd = pd.DataFrame([('SRB-0000001-001', 'Pw01', '2026-05-01'), ('SRB-0000002-001', 'Pw02', '2026-08-18'),
+                                 ('SRB-0000003-001', 'Pw03', '2026-08-17'), ('SRB-0000003-001', 'Pw03', '2026-08-18')],
+                                columns=['molecule_batch_identifier', 'plate', 'date'])
+        self.cdd['date'] = pd.to_datetime(self.cdd['date'])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_px_dates_first_then_cdd(self):
+        """A PX_DATES day wins. An experiment with no PX_DATES day takes the latest CDD day of its pair,
+        also through the Pw plate in its name. An experiment with no pair gets no day."""
+        report = pd.DataFrame([('uc1', 'SRB-0000001-001', 'Pw01'), ('uc2', 'SRB-0000002-001', 'Pw02'),
+                               ('uc3', 'SRB-0000003-001', 'DGN_A1_Pw03'), ('uc3', 'SRB-0000003-001', 'DGN_A1_Pw03'),
+                               ('uc4', 'SRB-0000004-001', 'Pw04')], columns=['uniquecontrast', 'srbnumber', 'plate'])
+        out = fn.fbx_dates(str(self.px), report, self.cdd, verbose=False)
+        # uc1 from PX_DATES; uc2 (empty PX_DATES day) and uc3 (Pw03 in the name, latest of two days) from CDD; no uc4
+        self.assertEqual(out, {'uc1': '2026-06-16', 'uc2': '2026-08-18', 'uc3': '2026-08-18'})
+
+    def test_px_dates_only(self):
+        """Without cdd, only the FBX rows of PX_DATES that have a day count."""
+        # uc2 has no day and uc9 is not FBX
+        self.assertEqual(fn.fbx_dates(str(self.px), verbose=False), {'uc1': '2026-06-16'})
+
+    def test_nothing_to_date(self):
+        """When PX_DATES dates every experiment, the CDD step adds nothing and does not fail."""
+        report = pd.DataFrame([('uc1', 'SRB-0000001-001', 'Pw01')], columns=['uniquecontrast', 'srbnumber', 'plate'])
+        # the empty lookup still gives the PX_DATES dict
+        self.assertEqual(fn.fbx_dates(str(self.px), report, self.cdd, verbose=False), {'uc1': '2026-06-16'})
+
 
 class TestEnsureFbxPlate(unittest.TestCase):
 
@@ -350,6 +435,141 @@ class TestEnsureFbxPlate(unittest.TestCase):
         d = pd.DataFrame({'uniquecontrast': ['a_complement_Pw99'], 'plate': ['Pw01']})
         # the file's own value wins over the name
         self.assertEqual(fn.ensure_fbx_plate(d)['plate'].item(), 'Pw01')
+
+
+class TestPxSources(unittest.TestCase):
+    """join_sources / cdd_pair_value / tag_fbx_sources / cdd_px_sources — the proteomics source of
+    each experiment, from CDD 'MSData - Proteomics activities: Source' (synthetic ids only)."""
+
+    def setUp(self):
+        # CDD rows: B3 has a BMS and a SERAC row on the same plate name, as Plate1-14 in the real data
+        self.src = pd.DataFrame([
+            ('SRB-0000001-001', 'Pw01', 'SERAC'), ('SRB-0000002-001', 'EM_S00001_Q1_H', 'EVOTEC'),
+            ('SRB-0000003-001', 'Plate1', 'BMS'), ('SRB-0000003-001', 'Plate1', 'SERAC'),
+            ('SRB-0000004-001', 'Pw07', 'SERAC'), ('SRB-0000006-001', 'Pw50', 'BMS'),
+            ('SRB-0000007-001', 'Pw60', 'BMS'), ('SRB-0000007-001', 'Pw61', 'SERAC')],
+            columns=['molecule_batch_identifier', 'plate', 'source'])
+
+    def test_join_sources(self):
+        """Sorted unique non-null sources joined by '+'; a group with none gives NaN."""
+        # duplicates and NaN go, the order is alphabetical
+        self.assertEqual(fn.join_sources(pd.Series(['SERAC', 'BMS', 'SERAC', np.nan])), 'BMS+SERAC')
+        # no source at all
+        self.assertTrue(pd.isna(fn.join_sources(pd.Series([np.nan, None]))))
+
+    def test_cdd_pair_value_pair_then_pw(self):
+        """Exact (batch, plate) first, then the Pw plate inside the name; no batch-only fallback,
+        so a batch that EVOTEC screened gets NaN on a plate that CDD does not list."""
+        exp = pd.DataFrame([
+            ('SRB-0000001-001', 'Pw01'), ('SRB-0000002-001', 'EM_S00001_Q1_H'), ('SRB-0000003-001', 'Plate1'),
+            ('SRB-0000004-001', 'DGN_A1_Pw07'), ('SRB-0000004-001', 'Pw07WT'), ('SRB-0000005-001', 'Pw01'),
+            ('SRB-0000002-001', 'Pw99')], columns=['MoleculeBatchID', 'MSPlate'], index=list('abcdefg'))
+        tag = fn.cdd_pair_value(exp, self.src, 'source', fn.join_sources)
+        # pair matches, the joined pair, the two Pw fallbacks
+        self.assertEqual(tag[list('abcde')].tolist(), ['SERAC', 'EVOTEC', 'BMS+SERAC', 'SERAC', 'SERAC'])
+        # unknown batch, and a known batch on an unlisted plate: NaN, on the index of exp
+        self.assertTrue(tag[['f', 'g']].isna().all())
+        self.assertEqual(list(tag.index), list('abcdefg'))
+
+    def test_tag_fbx_sources_excludes_whole_tags(self):
+        """EXCLUDE_SOURCES drops experiments whose tag is an excluded source; a joined tag stays.
+        An MS row goes only when every experiment of its compound goes; its source joins the
+        experiments that stay, NaN for a compound with no experiment."""
+        exp = [('uc1', 'C1', 'SRB-0000001-001', 'Pw01'), ('uc3', 'C3', 'SRB-0000003-001', 'Plate1'),
+               ('uc4', 'C4', 'SRB-0000006-001', 'Pw50'), ('uc5', 'C5', 'SRB-0000007-001', 'Pw60'),
+               ('uc6', 'C5', 'SRB-0000007-001', 'Pw61')]
+        df_raw = pd.DataFrame([e + (g,) for e in exp for g in ('G1', 'G2')],
+                              columns=['uniquecontrast', 'compound', 'MoleculeBatchID', 'MSPlate', 'genes'])
+        MS = pd.DataFrame({'compound': ['C1', 'C3', 'C4', 'C5', 'C9'], 'ndown': [1, 2, 3, 4, 5]})
+        out_raw, out_ms = fn.tag_fbx_sources(df_raw, MS, self.src, exclude=['BMS'])
+        # the two BMS experiments go, every gene row of the others stays
+        self.assertEqual(sorted(out_raw['uniquecontrast'].unique()), ['uc1', 'uc3', 'uc6'])
+        self.assertEqual(len(out_raw), 6)
+        # C4 had only a BMS experiment; C5 keeps its SERAC one; C9 has none and stays
+        self.assertEqual(out_ms.set_index('compound')['source'].fillna('NA').to_dict(),
+                         {'C1': 'SERAC', 'C3': 'BMS+SERAC', 'C5': 'SERAC', 'C9': 'NA'})
+        # no exclusion: every row stays, and C5 joins both sources
+        all_raw, all_ms = fn.tag_fbx_sources(df_raw, MS, self.src)
+        self.assertEqual((len(all_raw), len(all_ms)), (len(df_raw), len(MS)))
+        self.assertEqual(all_ms.set_index('compound').loc['C5', 'source'], 'BMS+SERAC')
+
+    def test_tag_fbx_sources_empty_tranche(self):
+        """A skipped tranche (empty frames) passes through with a source column."""
+        out_raw, out_ms = fn.tag_fbx_sources(pd.DataFrame(columns=fn.FBX_DFRAW_COLS),
+                                             pd.DataFrame(columns=fn.FBX_MS_COLS), self.src, exclude=['BMS'])
+        # both stay empty and gain the column
+        self.assertEqual((len(out_raw), len(out_ms)), (0, 0))
+        self.assertIn('source', out_raw.columns)
+        self.assertIn('source', out_ms.columns)
+
+    @unittest.skipUnless(Path('/home/gtamo/CDD_Vault_API/python/get_library.py').exists(), 'needs ~/CDD_Vault_API')
+    def test_cdd_vault_df_one_walk(self):
+        """One row per (molecule, batch), one row for a molecule with no batch; fields resolve as in get_df
+        (the real ColumnResolver); 'collection' joins the collection names, empty for none. Only the
+        session and the paging are faked, so nothing goes over the network."""
+        sys.path.append('/home/gtamo/CDD_Vault_API/python')   # appended: its module names never shadow ours
+        import get_library
+        mols = [{'name': 'SRB-0000001', 'collections': [{'id': 1, 'name': 'AJ'}, {'id': 2, 'name': 'AK'}],
+                 'molecule_fields': {'Subseries': 'AJ'},
+                 'batches': [{'molecule_batch_identifier': 'SRB-0000001-001', 'batch_fields': {'Lib Flavor': 'Main'}},
+                             {'molecule_batch_identifier': 'SRB-0000001-002', 'batch_fields': {}}]},
+                {'name': 'SRB-0000002', 'collections': None, 'molecule_fields': {'Subseries': 'AC'}, 'batches': []}]
+        fake_lib = SimpleNamespace(API_BASE='https://x', ColumnResolver=get_library.ColumnResolver,
+                                   load_token=lambda path: 'fake-token', make_session=lambda token: 'session')
+        fake_pd = SimpleNamespace(_paginate=lambda s, url, page_size=1000: iter(mols))
+        with unittest.mock.patch.dict(sys.modules, {'get_library': fake_lib, 'get_protocol_data': fake_pd}):
+            out = fn.cdd_vault_df(['name', 'molecule_batch_identifier', 'collection', 'Subseries', 'Lib Flavor'])
+        # two batch rows for the first molecule, one row for the molecule with no batch
+        self.assertEqual(out['name'].tolist(), ['SRB-0000001', 'SRB-0000001', 'SRB-0000002'])
+        # collections joined; empty for none; molecule and batch fields resolved, empty when missing
+        self.assertEqual(out['collection'].tolist(), ['AJ;AK', 'AJ;AK', ''])
+        self.assertEqual(out['Subseries'].tolist(), ['AJ', 'AJ', 'AC'])
+        self.assertEqual(out['Lib Flavor'].tolist(), ['Main', '', ''])
+
+    def test_cdd_px_sources_reads_readouts(self):
+        """The protocol rows become (batch, plate, source, date) by readout name, source upper-cased,
+        date read from dd.mm.yyyy; the CDD helpers are faked, so nothing goes over the network."""
+        rows = [{'readouts': {'11': {'value': 'SRB-0000001-001'}, '12': {'value': 'Pw01'}, '13': {'value': ' Evotec '},
+                              '14': {'value': '18.08.2026'}}},
+                {'readouts': {'11': {'value': 'SRB-0000002-001'}, '12': {'value': 'Plate1'}}}]
+        fake_lib = SimpleNamespace(load_token=lambda path: 'fake-token', make_session=lambda token: 'session')
+        fake_pd = SimpleNamespace(readout_names=lambda s, v, p: {11: 'Molecule-Batch ID', 12: 'MSPlate', 13: 'Source', 14: 'Date'},
+                                  protocol_rows=lambda s, v, p: rows)
+        with unittest.mock.patch.dict(sys.modules, {'get_library': fake_lib, 'get_protocol_data': fake_pd}):
+            out = fn.cdd_px_sources(121861)
+        # one row per protocol row, in the documented columns
+        self.assertEqual(out.columns.tolist(), ['molecule_batch_identifier', 'plate', 'source', 'date'])
+        self.assertEqual(out['plate'].tolist(), ['Pw01', 'Plate1'])
+        # stripped and upper-cased; a missing readout gives NA
+        self.assertEqual(out.loc[0, 'source'], 'EVOTEC')
+        self.assertTrue(pd.isna(out.loc[1, 'source']))
+        # the CDD date as a timestamp; a missing day gives NaT
+        self.assertEqual(out.loc[0, 'date'], pd.Timestamp('2026-08-18'))
+        self.assertTrue(pd.isna(out.loc[1, 'date']))
+
+
+class TestReadValidatedCmp(unittest.TestCase):
+
+    def test_strips_upper_cases_and_adds_the_molecule_id(self):
+        """A glue list with stray spaces, a lower-case gene, a -002 batch, a bare molecule id and one
+        batch on two genes: every cell is stripped, the genes are upper-cased, one row stays per file
+        row, and compound is the molecule id, so the curve, the t-SNE and the table join on it."""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'glue.csv'
+            p.write_text('genes,Batch Molecule-Batch ID\n'
+                         'TP53,SRB-0000001-001\n'
+                         ' brd4 ,SRB-0000002-002 \n'
+                         'MYC,SRB-0000003\n'
+                         'KRAS,SRB-0000002-002\n')
+            v = fn.read_validated_cmp(str(p))
+        # the file columns are kept and compound is added, one row per file row
+        self.assertEqual(v.columns.tolist(), ['genes', 'Batch Molecule-Batch ID', 'compound'])
+        # cells are stripped and genes upper-cased
+        self.assertEqual(v['genes'].tolist(), ['TP53', 'BRD4', 'MYC', 'KRAS'])
+        # the batch id keeps its batch, without the stray space
+        self.assertEqual(v['Batch Molecule-Batch ID'].iloc[1], 'SRB-0000002-002')
+        # batch id -> molecule id; a molecule id stays as it is
+        self.assertEqual(v['compound'].tolist(), ['SRB-0000001', 'SRB-0000002', 'SRB-0000003', 'SRB-0000002'])
 
 
 class TestMsFromDfRaw(unittest.TestCase):
@@ -490,6 +710,86 @@ class TestBinarySvdEmbedding(unittest.TestCase):
         self.assertEqual(fn.tanimoto_distance_matrix(self.BITS)[4, 5], 1.0)
         # yet proteins 0 and 2 are co-hit, so in SVD space 4 and 5 sit closer than 4 and 6
         self.assertGreater(f[4] @ f[5], f[4] @ f[6])
+
+
+class TestLabelPointsVertical(unittest.TestCase):
+    """Names on vertical lines along a rising curve (the discovery-curve labels of Px_Universe 9092b849)."""
+
+    def setUp(self):
+        self.fig, self.ax = plt.subplots(figsize=(8, 5), dpi=100)
+        self.cx = np.arange(1, 6001)
+        self.cy = 6000 * (1 - np.exp(-self.cx / 6000))
+        self.ax.scatter(self.cx, self.cy, s=4)
+        self.note = self.ax.text(0.98, 0.04, 'note\nnote\nnote', transform=self.ax.transAxes, ha='right', va='bottom')
+
+    def tearDown(self):
+        plt.close(self.fig)
+
+    def _place(self, x):
+        y = self.cy[x - 1]
+        texts, lines = fn.label_points_vertical(self.ax, x, y, [f'GENE{i:02d}' for i in range(len(x))],
+                                                curve_x=self.cx, curve_y=self.cy, avoid=[self.note],
+                                                text_kw=dict(fontsize=8, fontweight='bold'))
+        r = self.fig.canvas.get_renderer()
+        return x, y, texts, lines, [t.get_window_extent(r) for t in texts], self.ax.get_window_extent(r)
+
+    def test_lines_are_vertical_and_reach_their_label(self):
+        """10 spread points -> 10 lines, each at the x of its point, starting at the point, ending on its label."""
+        x, y, texts, lines, boxes, _ = self._place(np.linspace(300, 5700, 10).astype(int))
+        segs = lines.get_segments()
+        # one line per point
+        self.assertEqual(len(segs), 10)
+        # each line is vertical, at the x of its point, from the point
+        for s, px, py in zip(segs, x, y):
+            self.assertAlmostEqual(s[0, 0], px, places=6)
+            self.assertAlmostEqual(s[1, 0], px, places=6)
+            self.assertAlmostEqual(s[0, 1], py, places=6)
+        # each line ends on the edge of its own label (the label x-range holds the line)
+        to_px = self.ax.transData
+        for s, b in zip(segs, boxes):
+            ex, ey = to_px.transform(s[1])
+            self.assertTrue(b.x0 - 1 <= ex <= b.x1 + 1)
+            self.assertTrue(min(abs(ey - b.y0), abs(ey - b.y1)) < 1)
+
+    def test_spread_points_give_a_clean_layout(self):
+        """10 spread points -> no two labels overlap, every label inside the axes and off the note."""
+        _, _, _, _, boxes, A = self._place(np.linspace(300, 5700, 10).astype(int))
+        nb = self.note.get_window_extent(self.fig.canvas.get_renderer())
+        # no two labels overlap
+        self.assertFalse(any(boxes[i].overlaps(boxes[j]) for i in range(10) for j in range(i + 1, 10)))
+        # every label inside the axes and clear of the note
+        self.assertTrue(all(A.x0 <= b.x0 and b.x1 <= A.x1 and A.y0 <= b.y0 and b.y1 <= A.y1 for b in boxes))
+        self.assertFalse(any(b.overlaps(nb) for b in boxes))
+
+    def test_edge_point_label_stays_inside(self):
+        """A point at x=1 -> its label slides right to stay inside the axes; its line stays at x=1."""
+        x, _, _, lines, boxes, A = self._place(np.array([1, 3000]))
+        # the label is inside the axes
+        self.assertGreaterEqual(boxes[0].x0, A.x0)
+        # the line is still at the x of the point
+        self.assertAlmostEqual(lines.get_segments()[0][0, 0], 1.0, places=6)
+
+    def test_date_axis(self):
+        """Dates as x on a date axis -> each line sits at the date of its point, from the point to its label."""
+        dates = pd.date_range('2024-01-01', periods=6000, freq='3h')
+        self.ax.clear()
+        self.ax.scatter(dates, self.cy, s=4)
+        pick = np.array([500, 2500, 4500])
+        texts, lines = fn.label_points_vertical(self.ax, dates[pick], self.cy[pick], ['A', 'B', 'C'],
+                                                curve_x=dates, curve_y=self.cy, text_kw=dict(fontsize=8))
+        segs = lines.get_segments()
+        # one vertical line per point, at the x the date axis gives that date, starting at the point
+        for s, i in zip(segs, pick):
+            self.assertAlmostEqual(s[0, 0], self.ax.convert_xunits(dates[i:i + 1].to_numpy())[0], places=6)
+            self.assertAlmostEqual(s[1, 0], s[0, 0], places=9)
+            self.assertAlmostEqual(s[0, 1], self.cy[i], places=6)
+
+    def test_axis_limits_do_not_move(self):
+        """Placing labels fixes the limits: they equal the limits before the call."""
+        lim = (self.ax.get_xlim(), self.ax.get_ylim())
+        self._place(np.array([500, 2500, 4500]))
+        # the axes limits stay as they were
+        self.assertEqual((self.ax.get_xlim(), self.ax.get_ylim()), lim)
 
 
 class TestPlotSetIntersections(unittest.TestCase):

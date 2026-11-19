@@ -291,12 +291,25 @@ def _get_ot_score_local(df, gene_col, top_n, verbose, ot_root):
 # Proteomics data loading + MS-recency filtering
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+def join_sources(s):
+    """
+    Join the proteomics sources of a group into one tag: sorted, unique, non-null, separated by '+'
+    (``BMS+SERAC``). A group with no source gives NaN. Used as a ``groupby(...).agg`` function.
+
+    :param pd.Series s: the sources of one group.
+    :return: str tag, or NaN.
+    """
+    u = sorted(set(s.dropna()))
+    return '+'.join(u) if u else np.nan
+
+
 def load_proteomics_data(
     raw_proteomics_path,
     clean_proteomics_path,
     drop_plates=('Plate12', 'Plate15', 'Plate23'),
     mode='serac',
     collections=('AJ', 'AK'),
+    exclude_sources=('BMS',),
     verbose=True,
 ):
     """
@@ -308,30 +321,41 @@ def load_proteomics_data(
     differs, switched by ``mode``:
 
       * ``mode='serac'`` (default) — clean CDD MS export. Drop ``CDD Number``,
-        keep ``Source == 'SERAC'``, parse the screen date, and for compounds
-        screened more than once keep only the latest-dated row (one per
-        ``Molecule Name``). Join key:
+        parse the screen date, and for compounds screened more than once keep
+        only the latest-dated row (one per ``Molecule Name``). Join key:
         ``MSData - Proteomics activities: Molecule-Batch ID``.
       * ``mode='cddvault'`` — CDD Vault export. Rename ``SMILES`` → ``smiles``
         and keep only the ``collections`` of interest (drops PROTACs).
         Join key: ``Batch Molecule-Batch ID``.
 
-    Common to both: read the raw table, split ``MoleculeBatchID``
-    (``SRB-0000385-001``) into ``compound`` + ``batch``, drop ``drop_plates``
-    by ``MSPlate`` (a GLOBAL rule — never per-gene), then keep only the
-    molecule-batches present in the metadata table.
+    Common to both: the metadata ``Source`` column (with or without the
+    ``MSData - Proteomics activities:`` prefix) becomes ``source``, upper-cased
+    (the exports write both ``SERAC`` and ``Serac``). The rows of
+    ``exclude_sources`` go first, before the latest-date step (config
+    ``EXCLUDE_SOURCES``). This replaces the old ``Source == 'SERAC'`` rule, so
+    a new source such as ``EVOTEC`` stays. Then read the raw table, split
+    ``MoleculeBatchID`` (``SRB-0000385-001``) into ``compound`` + ``batch``,
+    drop ``drop_plates`` by ``MSPlate`` (a GLOBAL rule — never per-gene), keep
+    only the molecule-batches present in the metadata table, and give each raw
+    row the ``source`` of its batch.
 
     :param str raw_proteomics_path: raw per-(compound, gene) CSV; needs
         ``MoleculeBatchID`` and ``MSPlate`` columns.
-    :param str clean_proteomics_path: metadata CSV (schema depends on ``mode``).
+    :param str clean_proteomics_path: metadata CSV (schema depends on ``mode``);
+        needs a ``Source`` column.
     :param list drop_plates: plate IDs removed from the raw table before filtering.
     :param str mode: ``'serac'`` or ``'cddvault'`` — selects the metadata recipe.
     :param list collections: ``cddvault`` mode only — Collections to keep.
+    :param exclude_sources: metadata sources dropped, compared upper-case.
     :param bool verbose: print aggregate diagnostics (counts, shapes) — no
         per-compound rows are printed.
 
-    :return: ``(df_raw, MS)`` — filtered raw table and the metadata table.
+    :return: ``(df_raw, MS)`` — filtered raw table and the metadata table, both
+        with a ``source`` column.
     """
+    if mode not in ('serac', 'cddvault'):
+        raise ValueError(f"mode must be 'serac' or 'cddvault', got {mode!r}")
+
     # --- Raw table (common to all tranches) ---
     # round_trip: the exports store p as a plain decimal, and the default parser cuts it after
     # ~17 digits, so every p < ~1e-17 reads as 0 (Px_interface fix of 2026-10-21).
@@ -343,10 +367,16 @@ def load_proteomics_data(
     df_raw['compound'] = parts[0] + '-' + parts[1]   # 'SRB-0000385'
     df_raw['batch']    = parts[2]                    # '001'
 
-    # --- Metadata table (recipe depends on `mode`) ---
+    # --- Metadata table: the source of each row (upper-cased), minus exclude_sources ---
+    MS = pd.read_csv(clean_proteomics_path)
+    src_col = next((c for c in ('MSData - Proteomics activities: Source', 'Source') if c in MS.columns), None)
+    assert src_col is not None, f'no Source column found in {clean_proteomics_path}'
+    MS['source'] = MS[src_col].astype('string').str.strip().str.upper()
+    MS = MS[~MS['source'].isin([s.upper() for s in exclude_sources])]
+
+    # --- recipe depends on `mode` ---
     if mode == 'serac':
-        MS = pd.read_csv(clean_proteomics_path).drop(['CDD Number'], axis=1)
-        MS = MS[MS['MSData - Proteomics activities: Source'] == 'SERAC']
+        MS = MS.drop(['CDD Number'], axis=1)
         MS['MSData - Proteomics activities: Date'] = pd.to_datetime(
             MS['MSData - Proteomics activities: Date'])
         # If a compound is tested multiple times, keep only the latest date.
@@ -354,8 +384,8 @@ def load_proteomics_data(
                             ascending=False).reset_index()
         MS = MS.groupby('Molecule Name').first().reset_index()
         batch_col = 'MSData - Proteomics activities: Molecule-Batch ID'
-    elif mode == 'cddvault':
-        MS = pd.read_csv(clean_proteomics_path).rename(columns={'SMILES': 'smiles'})
+    else:
+        MS = MS.rename(columns={'SMILES': 'smiles'})
         # Collections filtering deliberately dropped — PROTAC removal is now done upstream
         # via the AJ/AK-filtered serac_df; the inner merge with serac_df downstream will
         # drop anything not in those collections. Lets this mode work on stripped Vault
@@ -368,11 +398,10 @@ def load_proteomics_data(
         assert batch_col is not None, (
             f"no Molecule-Batch ID column found in {clean_proteomics_path}; "
             f"expected one of {_batch_candidates}")
-    else:
-        raise ValueError(f"mode must be 'serac' or 'cddvault', got {mode!r}")
 
     if verbose:
-        print(f'> mode={mode} | MS rows: {len(MS):,} | join key: {batch_col}')
+        print(f'> mode={mode} | MS rows: {len(MS):,} | join key: {batch_col} '
+              f'| sources kept: {MS["source"].value_counts().to_dict()} (excluded: {list(exclude_sources)})')
         if mode == 'serac':
             print('>', MS['Molecule Name'].nunique(), 'unique compounds')
             print('> Ligase(s)', list(MS['MSData - Proteomics activities: Ligase'].unique()))
@@ -380,9 +409,10 @@ def load_proteomics_data(
         else:
             print('> Collections kept:', list(collections))
 
-    # --- Drop noisy plates (GLOBAL rule) + keep only molecule-batches in MS ---
+    # --- Drop noisy plates (GLOBAL rule) + keep only molecule-batches in MS, with the source of their batch ---
     df_raw = df_raw[~df_raw['MSPlate'].isin(list(drop_plates))]
     df_raw = df_raw[df_raw['MoleculeBatchID'].isin(MS[batch_col])]
+    df_raw['source'] = df_raw['MoleculeBatchID'].map(MS.groupby(batch_col)['source'].agg(join_sources))
     if verbose:
         print('> df_raw dim:', df_raw.shape)
 
@@ -687,8 +717,37 @@ def load_fbx_tranche(tranche_dir, *, control_compounds=(), contaminants=(),
     return df_raw_fbx, MS_fbx
 
 
+def fbx_dates(px_dates, report=None, cdd=None, verbose=True):
+    """
+    Date each FBX experiment for :func:`load_fbx_rds`. The Px database has no date, and ``PX_DATES``
+    (Px_interface ``build_px_archive``, 2026-10-21) dates only the experiments of the last Dropbox build,
+    by their tranche day (the Dropbox export day). With ``cdd``, an experiment that ``PX_DATES`` does not
+    date takes the CDD ``Date`` of its (batch, plate) pair (:func:`cdd_pair_value`; the latest day when the
+    pair has several). The CDD ``Date`` is a batch date: the CDD upload files give one value to a group of
+    plates, so it is neither the screen day nor the export day (2026-05-19 covers the plates of the
+    tranches 2026-06-16 to 2026-07-14).
+
+    :param str px_dates: ``PX_DATES`` csv (``uniquecontrast``, ``date``, ``source``); its FBX rows with a date count.
+    :param df report: REPORT rows (``uniquecontrast``, ``srbnumber``, ``plate``) of the experiments to date.
+    :param df cdd: :func:`cdd_px_sources` frame (``molecule_batch_identifier``, ``plate``, ``date``);
+                   None = ``PX_DATES`` only.
+    :param bool verbose: print the counts.
+    :return: dict ``uniquecontrast`` -> ``'YYYY-MM-DD'``.
+    """
+    d = pd.read_csv(px_dates, dtype=str)
+    d = d[d['source'] == 'FBX'].dropna(subset=['date']).drop_duplicates('uniquecontrast')
+    uc2date = dict(zip(d['uniquecontrast'], d['date']))
+    if cdd is None:
+        return uc2date
+    rep = report[~report['uniquecontrast'].isin(uc2date)].drop_duplicates('uniquecontrast')
+    found = pd.to_datetime(cdd_pair_value(rep, cdd, 'date', 'max', batch_col='srbnumber', plate_col='plate')).dropna()
+    if verbose:
+        print(f'> FBX dates: {len(uc2date):,} experiments from PX_DATES + {len(found):,} from the CDD Date readout')
+    return uc2date | dict(zip(rep.loc[found.index, 'uniquecontrast'], found.dt.strftime('%Y-%m-%d')))
+
+
 def load_fbx_rds(host, *, database='postgres', cred_file='~/.px_db_password',
-                 ca_bundle='global-bundle.pem', px_dates=None, archive_dir=None,
+                 ca_bundle='global-bundle.pem', px_dates=None, archive_dir=None, cdd_dates=None,
                  control_compounds=(), contaminants=(),
                  drop_plate_substr=('MLN', 'KO', 'Eval'),
                  dfraw_cols=FBX_DFRAW_COLS, ms_cols=FBX_MS_COLS, verbose=True):
@@ -703,8 +762,10 @@ def load_fbx_rds(host, *, database='postgres', cred_file='~/.px_db_password',
     1. A contrast uploaded two times keeps its newest insert (highest ``id``).
     2. On a contrast in both a main and a glues table, the **glues copy wins** — a validation
        export counts as the newer one, as in the tranche folders.
-    3. The database has no datestamp, so ``px_dates`` (``PX_DATES``) carries it; a contrast with
-       no date is skipped. Each date becomes one tranche, named ``YYYYMMDD``.
+    3. The database has no datestamp, so ``px_dates`` (``PX_DATES``) carries it. MS_ML only: with
+       ``cdd_dates``, an experiment that ``px_dates`` does not date takes the CDD batch date of its
+       (batch, plate) pair (:func:`fbx_dates`). A contrast with no date is skipped. Each date becomes
+       one tranche, named ``YYYYMMDD``.
     4. ``archive_dir`` (``PX_ARCHIVE_DIR``) fills the experiments the database lacks. On a
        contrast in both, the database wins.
 
@@ -714,6 +775,8 @@ def load_fbx_rds(host, *, database='postgres', cred_file='~/.px_db_password',
     :param str ca_bundle: Amazon RDS CA bundle (config ``RDS_CA_BUNDLE``).
     :param str px_dates: ``PX_DATES`` csv — ``uniquecontrast``, ``date``, ``source``.
     :param str archive_dir: ``PX_ARCHIVE_DIR`` holding ``fbx_measure.parquet`` / ``fbx_report.parquet``.
+    :param df cdd_dates: :func:`cdd_px_sources` frame, to date the experiments that ``px_dates`` does not
+                         (config ``PX_DATES_FROM_CDD``). None = ``px_dates`` only, as in Px_interface.
     :param control_compounds: control compound ids to drop entirely.
     :param contaminants: contaminant compound ids to drop entirely.
     :param drop_plate_substr: plate-name substrings to drop (MLN / KO / Eval).
@@ -724,9 +787,11 @@ def load_fbx_rds(host, *, database='postgres', cred_file='~/.px_db_password',
     """
     read = functools.partial(rds_table, host=host, database=database,
                              cred_file=cred_file, ca_bundle=ca_bundle)
-    dates = pd.read_csv(px_dates, dtype=str)
-    dates = dates[dates['source'] == 'FBX'].drop_duplicates('uniquecontrast')
-    uc2date = dict(zip(dates['uniquecontrast'], dates['date']))
+    # the date of each experiment: PX_DATES, else the CDD batch date of its (batch, plate) pair
+    report = None if cdd_dates is None else pd.concat(
+        [ensure_fbx_plate(read(table=t)) for t in ('px_fbx_report', 'px_fbx_glues_report')]
+        + [ensure_fbx_plate(pd.read_parquet(os.path.join(archive_dir, 'fbx_report.parquet')))], ignore_index=True)
+    uc2date = fbx_dates(px_dates, report, cdd_dates, verbose=verbose)
 
     frames = {}
     for kind, key, main, val in (('measure', ['uniquecontrast', 'genes', 'pg'], 'px_fbx_measure', 'px_fbx_glues'),
@@ -761,6 +826,117 @@ def load_fbx_rds(host, *, database='postgres', cred_file='~/.px_db_password',
         out[tranche] = (df_raw_fbx,
                         MS_fbx.assign(origin='MS' + tranche, date=pd.to_datetime(tranche))[ms_cols])
     return out
+
+
+def cdd_vault_df(columns, vault=7108, token_file='~/.cdd_token', page_size=1000):
+    """
+    Read every molecule of a CDD vault in one walk of ``/vaults/{v}/molecules``. CDD has no server-side
+    collection filter, so ``get_library.get_df`` makes this same walk one time per collection; one walk for
+    everything is faster and also gives the molecules that are in no collection. One row per (molecule,
+    batch); a molecule with no batch gives one row. The columns resolve as in ``get_df``
+    (``get_library.ColumnResolver``: top level, batch, ``molecule_fields``, ``batch_fields``; cells are str,
+    empty = no value). The name ``collection`` gives the molecule's collection names, joined by ``;`` (empty
+    = in no collection). GET requests only; the token stays in the session.
+
+    :param list columns: field names, as in config ``CHEMLIB_COLUMNS``.
+    :param int vault: CDD vault id.
+    :param str token_file: one-line CDD token file.
+    :param int page_size: molecules per request.
+    :return: df with ``columns``, one row per batch.
+    """
+    from get_library import API_BASE, ColumnResolver, load_token, make_session
+    from get_protocol_data import _paginate
+    s, res = make_session(load_token(token_file)), ColumnResolver(columns)
+    mols = tqdm(_paginate(s, f'{API_BASE}/vaults/{vault}/molecules', page_size=page_size), desc='CDD molecules', unit='mol')
+    rows = [res.resolve_row(m, b, ';'.join(c['name'] for c in (m.get('collections') or []) if isinstance(c, dict) and c.get('name')))
+            for m in mols for b in (m.get('batches') or [None])]
+    res.warn_unmatched()   # a name that matches no CDD field gives an empty column and a WARN line, as in get_df
+    return pd.DataFrame(rows, columns=columns)
+
+
+def cdd_px_sources(protocol, vault=7108, token_file='~/.cdd_token'):
+    """
+    Read the ``Source`` and ``Date`` readouts of a CDD proteomics protocol (config ``CDD_PX_PROTOCOL``:
+    'MSData - Proteomics activities'), one row per protocol row, with the batch and the plate that the row
+    describes. GET requests only, through the ``~/CDD_Vault_API`` helpers (``MS_build_ML`` puts them on
+    sys.path). The token stays in the session and is never printed.
+
+    :param int protocol: CDD protocol id.
+    :param int vault: CDD vault id.
+    :param str token_file: one-line CDD token file.
+    :return: df with ``molecule_batch_identifier``, ``plate``, ``source`` (upper-cased: SERAC / BMS / EVOTEC)
+             and ``date`` (a batch date that the upload file gives a group of plates, read from the text
+             ``dd.mm.yyyy``; NaT when it is missing).
+    """
+    from get_library import load_token, make_session
+    from get_protocol_data import protocol_rows, readout_names
+    s = make_session(load_token(token_file))
+    rid = {name: str(i) for i, name in readout_names(s, vault, protocol).items()}
+    cols = {'molecule_batch_identifier': 'Molecule-Batch ID', 'plate': 'MSPlate', 'source': 'Source', 'date': 'Date'}
+    out = pd.DataFrame([{k: ((r.get('readouts') or {}).get(rid[n]) or {}).get('value') for k, n in cols.items()}
+                        for r in protocol_rows(s, vault, protocol)], columns=list(cols))
+    return out.assign(source=out['source'].astype('string').str.strip().str.upper(),
+                      date=pd.to_datetime(out['date'], format='%d.%m.%Y', errors='coerce'))
+
+
+def cdd_pair_value(exp, cdd, col, agg, batch_col='MoleculeBatchID', plate_col='MSPlate'):
+    """
+    Give each experiment the CDD ``col`` value of its (batch, plate) pair, as ``agg`` of the CDD rows of
+    the pair (:func:`join_sources` for the source, ``'max'`` for the date). When the plate name differs
+    from the CDD one, use the Pw plate that the name holds (``DGN_A1_Pw150`` -> ``Pw150``, ``Pw45WT`` ->
+    ``Pw45``). An experiment with no pair gets NaN. There is no batch-only fallback: a batch that Evotec
+    screened can come back on a Serac plate that CDD does not list yet, and the batch would then give it
+    the wrong value.
+
+    :param df exp: one row per experiment, with ``batch_col`` and ``plate_col``.
+    :param df cdd: :func:`cdd_px_sources` output.
+    :param str col: the CDD column to give: ``source`` or ``date``.
+    :param agg: how the CDD rows of one pair combine (a function or a pandas aggregation name).
+    :param str batch_col: batch id column (``SRB-XXXXXXX-NNN``).
+    :param str plate_col: plate name column.
+    :return: Series of values, on the index of ``exp``.
+    """
+    pair = cdd.groupby(['molecule_batch_identifier', 'plate'])[col].agg(agg)
+    find = lambda plates: pd.Series(list(zip(exp[batch_col], plates)), index=exp.index, dtype=object).map(pair)
+    return find(exp[plate_col]).fillna(find(exp[plate_col].astype(str).str.extract(r'(Pw\d+)', expand=False)))
+
+
+def tag_fbx_sources(df_raw, MS, sources, exclude=()):
+    """
+    Tag one FBX tranche with the CDD source of each experiment (:func:`cdd_pair_value`), and drop the
+    ``exclude`` sources (config ``EXCLUDE_SOURCES``) before any per-compound collapse. The exclusion matches
+    a whole tag: a joined tag (``BMS+SERAC``) stays, because its experiment is not known to be the excluded
+    one. An MS row goes only when every experiment of its compound goes. Its ``source`` joins the sources of
+    the experiments that stay, and is NaN when the compound has no experiment in ``df_raw``.
+
+    :param df df_raw: the tranche's rows (``uniquecontrast``, ``compound``, ``MoleculeBatchID``, ``MSPlate``).
+    :param df MS: the tranche's per-compound rows (``compound``).
+    :param df sources: :func:`cdd_px_sources` output.
+    :param exclude: sources to drop, upper-case.
+    :return: ``(df_raw, MS)``, both with a ``source`` column.
+    """
+    exp = df_raw.drop_duplicates('uniquecontrast')
+    exp = exp[['uniquecontrast', 'compound']].assign(source=cdd_pair_value(exp, sources, 'source', join_sources))
+    keep = exp[~exp['source'].isin(list(exclude))]
+    df_raw = df_raw[df_raw['uniquecontrast'].isin(keep['uniquecontrast'])]
+    df_raw = df_raw.assign(source=df_raw['uniquecontrast'].map(keep.set_index('uniquecontrast')['source']))
+    MS = MS[~MS['compound'].isin(set(exp['compound']) - set(keep['compound']))]
+    return df_raw, MS.assign(source=MS['compound'].map(keep.groupby('compound')['source'].agg(join_sources)))
+
+
+def read_validated_cmp(path):
+    """
+    Read the curated glue list of Px_interface (config ``VALIDATED_TARGET_FILE``): one row per
+    validated gene and compound batch, with the columns ``genes`` and ``Batch Molecule-Batch ID``.
+    Strip every cell, upper-case the genes, and add ``compound``, the molecule id of the batch
+    (``SRB-XXXXXXX-002`` -> ``SRB-XXXXXXX``; a molecule id stays as it is).
+
+    :param str path: the csv (``~`` allowed).
+    :return: df with the file columns + ``compound``, one row per file row.
+    """
+    return (pd.read_csv(os.path.expanduser(path), dtype=str).apply(lambda s: s.str.strip())
+            .assign(genes=lambda x: x['genes'].str.upper(),
+                    compound=lambda x: x['Batch Molecule-Batch ID'].str.extract(r'^(\w+-\d+)', expand=False)))
 
 
 def ms_from_df_raw(MS, df_raw, edges=ACTIVITY_EDGES, labels=ACTIVITY_LABELS, verbose=True):
@@ -1293,6 +1469,95 @@ def binary_svd_embedding(bits, n_components=30, random_state=0):
     from sklearn.preprocessing import normalize
     tfidf = TfidfTransformer().fit_transform(np.asarray(bits, dtype=np.float32))
     return normalize(TruncatedSVD(n_components, random_state=random_state).fit_transform(tfidf))
+
+
+def label_points_vertical(ax, x, y, labels, curve_x=None, curve_y=None, avoid=(), first=0.08, rows=20,
+                          gap=0.3, slides=(0, -0.25, -0.45), min_room=0.25, text_kw=None, line_kw=None):
+    """
+    Name points with labels joined by vertical lines, as on a timeline: each label sits above or
+    below its point and the line from the point to the label stays vertical.
+
+    The labels are placed in x order. Each label takes the shortest line that gives a free slot.
+    At each line length it tries both sides. The first side alternates from one label to the next,
+    unless one side has less than `min_room` of the axes height: then the other side goes first.
+    It also tries
+    each offset in `slides`: the label centred on its line, or slid left so the line meets it
+    off-centre. A slot is free when the label stays inside the axes, covers no placed label, no
+    curve point and no `avoid` artist, its line crosses no placed label, and no placed line crosses
+    it. Among the free slots of that length, it takes the one whose box covers the fewest x of the
+    points still to place, because their lines will need that column. When no length gives a free
+    slot, the label takes the slot with the fewest conflicts. A label near the left or right edge
+    moves sideways to stay inside the axes; its line stays at the x of the point.
+
+    Call it last, after everything that sets the axis limits: it fixes the limits as they are.
+
+    :param ax: the Axes.
+    :param x: x of the points to name, data units (numbers, or dates on a date axis).
+    :param y: y of the points to name, data units.
+    :param labels: one string per point.
+    :param curve_x: x of the points the labels must not cover (e.g. a curve), data units.
+    :param curve_y: y of those points.
+    :param avoid: artists (e.g. a Text) whose boxes the labels must not cover.
+    :param float first: the shortest line, as a fraction of the axes height.
+    :param int rows: how many line lengths to try on each side.
+    :param float gap: free space between stacked labels, as a fraction of the label height.
+    :param float min_room: below this fraction of the axes height, a side is never tried first.
+    :param tuple slides: label offsets to try, as fractions of the label width (0 = centred,
+                         -0.45 = the line meets the label near its right end).
+    :param dict text_kw: ``ax.text`` keywords (fontsize, color, fontweight, ...).
+    :param dict line_kw: ``ax.vlines`` keywords (color, lw, ...).
+    :return: (texts, lines): the Text artists in x order and the LineCollection.
+    """
+    ax.set(xlim=ax.get_xlim(), ylim=ax.get_ylim())
+    r = ax.figure.canvas.get_renderer()
+    to_px, to_data = ax.transData, ax.transData.inverted()
+    A = ax.get_window_extent(r)
+    xy = lambda a, b: np.c_[np.asarray(ax.convert_xunits(np.asarray(a)), float), np.asarray(ax.convert_yunits(np.asarray(b)), float)]
+    P = to_px.transform(xy(x, y))
+    C = to_px.transform(xy(curve_x, curve_y)) if curve_x is not None else np.empty((0, 2))
+    obst = [(b.x0, b.x1, b.y0, b.y1) for b in (a.get_window_extent(r) for a in avoid)]
+    texts = [ax.text(0, 0, str(s), ha='center', va='center', **(text_kw or {})) for s in labels]
+    size = [(b.width, b.height) for b in (t.get_window_extent(r) for t in texts)]
+    placed, segs = [], []   # label boxes (x0, x1, y0, y1) and lines (x, ya, yb), display px
+
+    def conflicts(box, seg):
+        x0, x1, y0, y1 = box
+        n = 10 * (x0 < A.x0 + 2 or x1 > A.x1 - 2 or y0 < A.y0 + 2 or y1 > A.y1 - 2)
+        n += sum(x0 < b1 and x1 > b0 and y0 < c1 and y1 > c0 for b0, b1, c0, c1 in placed + obst)
+        n += int(((C[:, 0] > x0) & (C[:, 0] < x1) & (C[:, 1] > y0) & (C[:, 1] < y1)).any())
+        n += sum(b0 < seg[0] < b1 and min(seg[1:]) < c1 and max(seg[1:]) > c0 for b0, b1, c0, c1 in placed)
+        n += sum(x0 < sx < x1 and min(sa, sb) < y1 and max(sa, sb) > y0 for sx, sa, sb in segs)
+        return n
+
+    order = np.argsort(P[:, 0], kind='stable')
+    for i, k in enumerate(order):
+        (px, py), (w, h) = P[k], size[k]
+        later, best = P[order[i + 1:], 0], None
+        up, down = A.y1 - py > min_room * A.height, py - A.y0 > min_room * A.height
+        sides = (1, -1) if (up and (i % 2 or not down)) else (-1, 1)
+        for j in range(rows):
+            for s in sides:
+                for f in slides:
+                    cx = min(max(px + f * w, A.x0 + w / 2 + 3), A.x1 - w / 2 - 3)
+                    edge = py + s * (first * A.height + j * h * (1 + gap))
+                    box = (cx - w / 2, cx + w / 2) + ((edge, edge + h) if s > 0 else (edge - h, edge))
+                    n = 10 * conflicts(box, (px, py, edge)) + ((later > box[0]) & (later < box[1])).sum()
+                    best = (n, s, edge, box, cx) if best is None or n < best[0] else best
+                    if n == 0:
+                        break
+                if best[0] == 0:
+                    break
+            if best[0] == 0:
+                break
+        _, s, edge, box, cx = best
+        placed.append(box)
+        segs.append((px, py, edge))
+        texts[k].set_position(to_data.transform((cx, edge)))
+        texts[k].set_verticalalignment('bottom' if s > 0 else 'top')
+    seg_data = [to_data.transform([(sx, sa), (sx, sb)]) for sx, sa, sb in segs]
+    lines = ax.vlines([a[0, 0] for a in seg_data], [a[0, 1] for a in seg_data], [a[1, 1] for a in seg_data],
+                      **(line_kw or {}))
+    return [texts[k] for k in order], lines
 
 
 def plot_set_intersections(sets, order=None, min_size=1, max_patterns=25, sort='size',
